@@ -1,3 +1,4 @@
+``` bash
 # Setup
 
 sudo apt-get update
@@ -17,3 +18,4 @@ newgrp docker
 
 # Test
 docker ps
+```
