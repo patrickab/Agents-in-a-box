@@ -1,0 +1,21 @@
+# .github/dependabot.yml
+
+version: 2
+updates:
+
+  # Main rule for your Python dependencies
+  - package-ecosystem: "pip"
+    directory: "/" # Look for pyproject.toml in the root directory
+    schedule:
+      interval: "weekly"
+
+    reviewers:
+      - "patrickab"
+
+    # Group related updates to reduce PR noise
+    groups:
+      streamlit-plugins:
+        patterns:
+          - "streamlit*"
+          - "st-copy"
+
