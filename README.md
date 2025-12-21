@@ -1,12 +1,31 @@
 # Agent-in-a-Box
 
-**Agent-in-a-Box** is a security-first orchestration layer that wraps arbitrary CLI-based AI Agents into a unified, sandboxed runtime. It allows developers to deploy untrusted AI agents against local repositories with zero risk to the host operating system.
+**Agent-in-a-Box** is a security-first orchestration layer that wraps arbitrary CLI-based AI Agents into a unified, sandboxed runtime. It allows developers to deploy AI agents against local repositories with zero operational risk to the host operating system. After execution the agents container is destroyed & only the user-specified directory remains on the system for inspection.
+
+Supports:
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- [Qwen Code](https://github.com/QwenLM/qwen-code)
+- [Aider](https://aider.chat/)
+
+---
+
+## 🎯 Purpose
+
+Most state-of-the-art coding agents—such as **Aider**, **Gemini CLI**, and **Qwen Code**—are typically designed for frictionless adoption, operating directly on the host machine with the full privileges of the active user.
+
+In their default configuration, these agents possess:
+*   **Unrestricted Filesystem Access:** Agents can read, modify, or delete any file accessible to the user, extending far beyond the target repository.
+*   **Arbitrary Code Execution:** The ability to generate and execute scripts (Python, Bash, etc.) directly on the host OS.
+
+**Agent-in-a-Box** mitigates this operational risk by decoupling the agent from the host. It functions as a containment layer, providing a unified, ergonomic interface to orchestrate these tools within a heavily restricted runtime.
 
 ---
 
 ## 🛡️ Security Architecture
 
-Operates under **Zero-Trust Execution Policy** based on the **"Assume Breach" Principle**: *Any agentic system is treated as potentially malicious.*
+### **Zero-Trust Execution Policy**
+
+Any agentic system is treated as potentially malicious.
 
 ### 1. Rootless Infrastructure
 Excludes any potential of container breakout attacks by removing root privileges from the container.
