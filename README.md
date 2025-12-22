@@ -1,6 +1,6 @@
 # Agent-in-a-Box
 
-**Agent-in-a-Box** is a secure orchestration layer that wraps arbitrary AI agents (such as Aider or Gemini) into a unified sandboxed, ephemeral runtime. It solves the "untrusted execution" problem inherent in autonomous coding agents by decoupling the agent from the host OS. It allows developers to deploy agents against local repositories with **rootless containerization**, **kernel-level isolation**, and **strict network perimeter control**.
+**Agent-in-a-Box** is a secure orchestration layer that wraps arbitrary agents into a unified sandboxed, ephemeral runtime. It allows developers to deploy agents against local repositories with **rootless containerization**, **kernel-level isolation**, and **strict network perimeter control**.
 
 **Supported Agents:**
 *   [Aider](https://aider.chat/)
@@ -13,11 +13,12 @@
 
 State-of-the-art coding agents are designed for friction-free adoption, typically running directly on the host machine with the full privileges of the active user.
 
-In their default configuration, these agents possess:
-*   **Unrestricted Filesystem Access:** Agents can read, modify, or delete any file accessible to the user, extending far beyond the target repository.
-*   **Arbitrary Code Execution:** Agents often generate and execute scripts (Python, Bash) to solve tasks. A hallucination or malicious prompt injection could lead to destructive commands (e.g., `rm -rf ~`) running directly on the host.
+Default configuration:
+*   **Unrestricted Filesystem Access:** Agents can read, modify, or delete any file accessible to the user.
+*   **Arbitrary Code Execution:** Generate & execute scripts (Python, Bash).
+*   **Network Access:** Allow arbitrary network traffic - While the supported Agents always ask for permission before contacting a website, they technically have the capability to send any data to any publicly accessible domain. They can also install arbitrary software in your binaries.
 
-**Agent-in-a-Box** mitigates this operational risk by decoupling the agent from the host. It functions as a containment layer, providing a unified, ergonomic interface to orchestrate these tools within a heavily restricted runtime.
+**Agent-in-a-Box** mitigates this operational risk by decoupling the agent from the host. It functions as a containment layer, providing a unified, ergonomic interface to orchestrate these tools within a heavily restricted runtime with supervised network traffic.
 
 ---
 
@@ -25,7 +26,7 @@ In their default configuration, these agents possess:
 
 ### **Zero-Trust Execution Policy**
 
-Agent-in-a-Box treats the AI agent as an untrusted entity with malicious intent, but still provides the capability to execute arbitrary code within its sandbox. It enforces a **Zero-Trust** policy using a multi-layered defense strategy.
+Agent-in-a-Box treats any AI agent as an untrusted entity with intent of malicious code execution. It enforces a **Zero-Trust** policy using a multi-layered defense strategy.
 
 ### 1. Rootless Infrastructure
 Excludes any potential of container breakout attacks by removing root privileges from the container.
@@ -34,7 +35,7 @@ Excludes any potential of container breakout attacks by removing root privileges
 
 ### 2. Kernel-Level Isolation (gVisor)
 Standard containers share the host kernel, leaving a surface for syscall exploits. This project integrates **gVisor (runsc)** to virtualize the system call interface.
-*   **Interception of System Calls:** gVisor intercepts application system calls and handles them in a distinct, user-space kernel.
+*   **Interception of System Calls:** gVisor handles application systemcalls in a distinct, user-space kernel. Any system call with system-level privileges is automatically rejected.
 *   **Attack Surface Reduction:** This creates a robust boundary between the untrusted application and the actual host kernel, preventing deep-system kernel exploits.
 
 ### 3. Network Perimeter Control
@@ -70,9 +71,9 @@ The core philosophy is **Isolation by Default**. The system wraps any CLI agent 
 
 Agent-in-a-Box is designed as a framework, not a tool. Adding a new CLI agent requires zero changes to the core logic.
 
-*   **Logic:** Inherit from the abstract `CodeAgent` base class.
-*   **Configuration:** Define a **Pydantic model** for the agent's specific command-line arguments.
-*   **Interface:** Create a minimal Streamlit UI component to populate that model.
+*   **Step 1:** Inherit from the abstract `CodeAgent` base class.
+*   **Step 2:** Define a **Pydantic model** for the agent's specific command-line arguments.
+*   **Step 3:** Create a minimal Streamlit UI component to populate that model.
 
 The system supports both GUI-driven execution and headless Python scripting via the Pydantic command models.
 
@@ -128,6 +129,4 @@ Launch the orchestration UI:
 
 ```bash
 streamlit run src/app.py
-```Fi/Ethernet.
-2.  **Deterministic Access:** Firewall rules strictly limit access to the container subnet (`172.17.0.0/16`).
-3.  **Stability:** The static alias persists regardless of DHCP changes on the host network.
+```
