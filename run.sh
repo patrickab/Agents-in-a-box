@@ -1,2 +1,2 @@
 #!/bin/sh
-python -m run.something
+streamlit run  src/code_agent.py

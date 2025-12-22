@@ -1,9 +1,16 @@
 [project]
-name = "template"
+name = "Agent-in-a-box"
 version = "0.1.0"
+description = "Standalone secure code agent with Docker sandboxing"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "something>=4.2.0"
+    "docker>=7.1.0",
+    "gitpython>=3.1.0",
+    "llm-baseclient @ git+ssh://git@github.com/patrickab/llm-baseclient.git@main",
+    "pydantic>=2.0.0",
+    "rich>=13.0.0",
+    "streamlit>=1.51.0",
 ]
 
 [build-system]
@@ -11,7 +18,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/template"] 
+packages = ["src/code_agent"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 target-version = "py312"
