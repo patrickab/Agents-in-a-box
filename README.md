@@ -81,11 +81,58 @@ Initialize the security layer (Rootless Docker & gVisor configuration).
 ./scripts/setup-agent-sandbox.sh
 ```
 
+---
+
 ### 2. The Bakery (Image Build)
 Compile the immutable Docker images for your configured agents.
 ```bash
 python src/docker/dockerimage-bakery.py
 ```
 
+---
+
 ### 3. Run
 Launch the Streamlit interface or execute the Python entry point to start a session.
+
+---
+
+## Local Inference/Service Setup
+
+Any local inference service (Ollama, etc.) must listen on all interfaces (0.0.0.0) (127.0.0.1) so Docker containers can access it via host.docker.internal.
+
+**Systemd Configuration (Recommended)**
+``` bash
+sudo systemctl edit ollama.service
+
+# --- Add to configuration
+# ... /etc/systemd/system/ollama.service.d/.#override.conffefd312e8a766f95
+# ---
+
+[Service]
+Environment="[SERVICE_HOST_VAR]=0.0.0.0:[PORT]"
+```
+
+**Apply Changes**
+``` bash
+# Reload systemd and restart service
+sudo systemctl daemon-reload
+sudo systemctl restart [SERVICE_NAME]
+
+# Verify service is listening on all interfaces
+sudo ss -tlnp | grep [PORT]  # Should show *:[PORT] not 127.0.0.1:[PORT]
+```
+
+**Why This is Required**
+ - Docker containers possess their own local network - therefore they cant easily reach 127.0.0.1 (localhost) of the host
+ - host.docker.internal maps to host's network, but only if service listens on external interfaces
+ - Setting [SERVICE_HOST_VAR]=0.0.0.0:[PORT] makes the service accessible to Docker containers
+
+**Security Implications**
+
+This setup is safe when using the recommended systemd configuration because:
+
+1. Local Network Only: Service is only accessible within your trusted local network (not exposed to internet)
+2. API Authentication: Ollama requires API keys for access, preventing unauthorized usage
+3. Container Isolation: Docker containers are still isolated by gVisor and security policies
+4. Firewall Protection: Can be further secured with ufw to restrict access to Docker subnet only
+Risk Level: Equivalent to other local development tools (Docker, databases, etc.) that bind to 0.0.0.0 for container access.
