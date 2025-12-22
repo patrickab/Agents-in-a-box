@@ -1,21 +1,21 @@
 # Agent-in-a-Box
 
-**Agent-in-a-Box** is a security-first orchestration layer that wraps arbitrary CLI-based AI Agents into a unified, sandboxed runtime. It allows developers to deploy AI agents against local repositories with zero operational risk to the host operating system. After execution the agents container is destroyed & only the user-specified directory remains on the system for inspection.
+**Agent-in-a-Box** is a secure orchestration layer that wraps arbitrary AI agents (such as Aider or Gemini) into a unified sandboxed, ephemeral runtime. It solves the "untrusted execution" problem inherent in autonomous coding agents by decoupling the agent from the host OS. It allows developers to deploy agents against local repositories with **rootless containerization**, **kernel-level isolation**, and **strict network perimeter control**.
 
-Supports:
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli)
-- [Qwen Code](https://github.com/QwenLM/qwen-code)
-- [Aider](https://aider.chat/)
+**Supported Agents:**
+*   [Aider](https://aider.chat/)
+*   [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+*   [Qwen Code](https://github.com/QwenLM/qwen-code)
 
 ---
 
 ## 🎯 Purpose
 
-Most state-of-the-art coding agents—such as **Aider**, **Gemini CLI**, and **Qwen Code**—are typically designed for frictionless adoption, operating directly on the host machine with the full privileges of the active user.
+State-of-the-art coding agents are designed for friction-free adoption, typically running directly on the host machine with the full privileges of the active user.
 
 In their default configuration, these agents possess:
 *   **Unrestricted Filesystem Access:** Agents can read, modify, or delete any file accessible to the user, extending far beyond the target repository.
-*   **Arbitrary Code Execution:** The ability to generate and execute scripts (Python, Bash, etc.) directly on the host OS.
+*   **Arbitrary Code Execution:** Agents often generate and execute scripts (Python, Bash) to solve tasks. A hallucination or malicious prompt injection could lead to destructive commands (e.g., `rm -rf ~`) running directly on the host.
 
 **Agent-in-a-Box** mitigates this operational risk by decoupling the agent from the host. It functions as a containment layer, providing a unified, ergonomic interface to orchestrate these tools within a heavily restricted runtime.
 
@@ -25,34 +25,39 @@ In their default configuration, these agents possess:
 
 ### **Zero-Trust Execution Policy**
 
-Any agentic system is treated as potentially malicious.
+Agent-in-a-Box treats the AI agent as an untrusted entity with malicious intent, but still provides the capability to execute arbitrary code within its sandbox. It enforces a **Zero-Trust** policy using a multi-layered defense strategy.
 
 ### 1. Rootless Infrastructure
 Excludes any potential of container breakout attacks by removing root privileges from the container.
 *   **Unprivileged Daemon:** The Docker Engine runs without root privileges on the host.
-*   **Identity Mapping:** Utilizes user namespaces to map the container's `root` user to a non-privileged user on the host. Even if an attacker breaks out of the container, they find themselves with zero permissions on the host machine (no read, no read, no execute permissions)
+*   **Identity Mapping:** Utilizes user namespaces to map the container's `root` user to a non-privileged user on the host. Even in the event of a container breakout, the attacker finds themselves with zero permissions on the host filesystem.
 
 ### 2. Kernel-Level Isolation (gVisor)
-Standard containers share the host kernel, leaving a surface for syscall exploits. This project utilizes **gVisor (runsc)** to close this gap.
-*   **Sandboxed System Calls:** gVisor intercepts application system calls and handles them in a distinct, user-space kernel.
-*   **Host Protection:** This acts as a robust "firewall" between the untrusted application and the actual host kernel, preventing deep-system exploits.
+Standard containers share the host kernel, leaving a surface for syscall exploits. This project integrates **gVisor (runsc)** to virtualize the system call interface.
+*   **Interception of System Calls:** gVisor intercepts application system calls and handles them in a distinct, user-space kernel.
+*   **Attack Surface Reduction:** This creates a robust boundary between the untrusted application and the actual host kernel, preventing deep-system kernel exploits.
 
 ### 3. Network Perimeter Control
-*   **Traffic Segregation:** Containers are placed on isolated bridge networks.
-*   **Exfiltration Prevention:** Strict rules limit the container's ability to communicate with internal networks or move laterally to other services.
+*   **Traffic Segregation:** Containers are isolated on strict bridge networks.
+*   **Exfiltration Prevention:** Firewall rules limit the container's ability to scan internal networks or move laterally to other services.
+
+### 4. Secure Host Bridge (Digital Air-Gap)
+*   **Loopback Isolation:** Host-Container communication is routed via a static loopback alias (`10.200.200.1`). Traffic is air-gapped from physical interfaces (Wi-Fi/Eth), preventing accidental LAN exposure.
+*   **Deterministic Firewalling:** Access is strictly controlled via UFW rules linking the Docker subnet to the static alias, independent of host network changes.
 
 ---
 
 ## 🏗️ System Architecture
 
-The core philosophy is **Isolation by Default**. The system wraps any CLI agent into an abstract `CodeAgent` class. When a user provides a GitHub URL via the Streamlit interface, the system orchestrates the following pipeline:
+The core philosophy is **Isolation by Default**. The system wraps any CLI agent into an abstract `CodeAgent` class.
 
-1.  **Workspace Provisioning:** A temporary directory (`~/agent_sandbox/<repository>`) is created on the host.
+1.  **Workspace Provisioning:** A temporary directory (`~/agent_sandbox/<repo>`) is created on the host.
 2.  **Ephemeral Runtime:** A Docker container is launched using a pre-baked, immutable image specific to the chosen agent.
 3.  **Bind-Mounting:** The host workspace is mounted into the container.
-    *   **Read/Write:** The agent can modify files within the sandbox.
-    *   **Persistence:** When the container is destroyed, artifacts (code changes) remain on the host for inspection.
+    *   *Persistence:* Code changes are written to the mounted directory.
+    *   *Containment:* The agent cannot access any path outside this specific mount.
 4.  **Interactive Session:** The container launches in interactive mode, bridging the user's terminal to the sandboxed agent.
+5.  **Cleanup:** Upon exit, the container is destroyed. Only the modified code artifacts remain on the host.
 
 ### Key Guarantees
 *   **Filesystem Integrity:** The agent has **no access** to the host filesystem outside the specific bind-mounted sandbox.
@@ -73,66 +78,56 @@ The system supports both GUI-driven execution and headless Python scripting via 
 
 ---
 
+## 💻 Local Inference & Secure Bridging
+
+To allow the sandboxed agent to communicate with local LLM servers (e.g., Ollama) without exposing the host to the local area network (LAN), we utilize a **Logical Air-Gap**.
+
+### The Loopback Strategy
+Instead of binding services to `0.0.0.0` (all interfaces), we create a static alias on the loopback interface.
+
+1.  **Traffic Isolation:** We assign a static IP (`10.200.200.1`) to the host's loopback device. This IP is not routable from physical interfaces (Wi-Fi/Ethernet).
+2.  **Deterministic Firewalling:** We use UFW to strictly allow traffic *only* from the Docker subnet (`172.17.0.0/16`) to this specific alias.
+
+**Network Flow:**
+`Container (172.17.x.x)` $\to$ `Host Loopback Alias (10.200.200.1)` $\to$ `Ollama Service`
+
+This ensures that while the container can access the LLM, the LLM service remains invisible to the outside world.
+
+---
+
 ## 🚀 Usage
 
 ### 1. Infrastructure Setup
-Initialize the security layer (Rootless Docker & gVisor configuration).
+Initialize the security layer (Rootless Docker context & gVisor configuration).
+
 ```bash
 ./scripts/setup-agent-sandbox.sh
 ```
 
----
-
-### 2. The Bakery (Image Build)
+### 2. Image Build Pipeline
 Compile the immutable Docker images for your configured agents.
+
 ```bash
 python src/docker/dockerimage-bakery.py
 ```
 
----
+### 3. Network Configuration (Optional for Local LLMs)
+If running local inference, establish the secure loopback bridge:
 
-### 3. Run
-Launch the Streamlit interface or execute the Python entry point to start a session.
+```bash
+# 1. Create Loopback Alias
+sudo ip addr add 10.200.200.1/32 dev lo
 
----
-
-## Local Inference/Service Setup
-
-Any local inference service (Ollama, etc.) must listen on all interfaces (0.0.0.0) (127.0.0.1) so Docker containers can access it via host.docker.internal.
-
-**Systemd Configuration (Recommended)**
-``` bash
-sudo systemctl edit ollama.service
-
-# --- Add to configuration
-# ... /etc/systemd/system/ollama.service.d/.#override.conffefd312e8a766f95
-# ---
-
-[Service]
-Environment="[SERVICE_HOST_VAR]=0.0.0.0:[PORT]"
+# 2. Configure Firewall (Allow Docker Subnet -> Alias)
+sudo ufw allow from 172.17.0.0/16 to 10.200.200.1 port 11434 proto tcp comment 'Secure Sandbox Bridge'
+sudo ufw reload
 ```
 
-**Apply Changes**
-``` bash
-# Reload systemd and restart service
-sudo systemctl daemon-reload
-sudo systemctl restart [SERVICE_NAME]
+### 4. Run
+Launch the orchestration UI:
 
-# Verify service is listening on all interfaces
-sudo ss -tlnp | grep [PORT]  # Should show *:[PORT] not 127.0.0.1:[PORT]
-```
-
-**Why This is Required**
- - Docker containers possess their own local network - therefore they cant easily reach 127.0.0.1 (localhost) of the host
- - host.docker.internal maps to host's network, but only if service listens on external interfaces
- - Setting [SERVICE_HOST_VAR]=0.0.0.0:[PORT] makes the service accessible to Docker containers
-
-**Security Implications**
-
-This setup is safe when using the recommended systemd configuration because:
-
-1. Local Network Only: Service is only accessible within your trusted local network (not exposed to internet)
-2. API Authentication: Ollama requires API keys for access, preventing unauthorized usage
-3. Container Isolation: Docker containers are still isolated by gVisor and security policies
-4. Firewall Protection: Can be further secured with ufw to restrict access to Docker subnet only
-Risk Level: Equivalent to other local development tools (Docker, databases, etc.) that bind to 0.0.0.0 for container access.
+```bash
+streamlit run src/app.py
+```Fi/Ethernet.
+2.  **Deterministic Access:** Firewall rules strictly limit access to the container subnet (`172.17.0.0/16`).
+3.  **Stability:** The static alias persists regardless of DHCP changes on the host network.
