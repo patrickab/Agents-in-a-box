@@ -161,8 +161,7 @@ class DockerSandbox:
         ]
 
         self.logger.info(f"Executing command: {agent_cmd.split(' ')}")
-
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(" ".join(cmd), check=True)
         except subprocess.CalledProcessError as e:
             raise ContainerRuntimeError(f"Container execution failed: {e}")
