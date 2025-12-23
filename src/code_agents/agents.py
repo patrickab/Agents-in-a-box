@@ -320,6 +320,45 @@ def copy_changed_files_to_home(workspace: Path, repo_url: str) -> tuple[int, Pat
     return copied, target_root
 
 
+def sync_and_commit_to_home(workspace: Path, repo_url: str, message: str) -> tuple[bool, str]:
+    """
+    Sync changed files to the user's home repo and commit them.
+
+    Returns (success, message).
+    """
+    copied, target_root = copy_changed_files_to_home(workspace=workspace, repo_url=repo_url)
+    if copied == 0:
+        return False, "No changed files to sync; nothing to commit."
+
+    try:
+        # Stage all changes
+        add_result = subprocess.run(
+            ["git", "-C", str(target_root), "add", "."],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if add_result.returncode != 0:
+            return False, f"git add failed:\n{add_result.stderr}"
+
+        # Commit
+        commit_result = subprocess.run(
+            ["git", "-C", str(target_root), "commit", "-m", message],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if commit_result.returncode != 0:
+            # If nothing to commit, treat as non-fatal
+            if "nothing to commit" in commit_result.stderr.lower():
+                return False, "Nothing to commit in home repository."
+            return False, f"git commit failed:\n{commit_result.stderr}"
+
+        return True, f"Committed changes in `{target_root}`."
+    except Exception as exc:
+        return False, f"Commit failed: {exc}"
+
+
 def agent_controls() -> None:
     """Streamlit entrypoint for multi-agent code workspace."""
 
@@ -471,6 +510,28 @@ def chat_interface() -> None:
             if diff:
                 st.markdown("### Git Diff")
                 st.code(diff, language="diff")
+
+                st.markdown("### Commit Changes")
+                commit_msg = st.text_input(
+                    "Commit message",
+                    value="",
+                    key="commit_message_input",
+                    placeholder="Describe your changes...",
+                )
+                if st.button("Commit Changes", key="commit_changes_button"):
+                    if not commit_msg.strip():
+                        st.warning("Please enter a commit message.")
+                    else:
+                        with st.spinner("Syncing and committing changes to home repository..."):
+                            success, msg = sync_and_commit_to_home(
+                                workspace=selected_agent.path_agent_workspace,
+                                repo_url=selected_agent.repo_url,
+                                message=commit_msg.strip(),
+                            )
+                        if success:
+                            st.success(msg)
+                        else:
+                            st.info(msg)
             else:
                 st.info("No changes detected in git diff.")
 
