@@ -355,6 +355,7 @@ def agent_controls() -> None:
             with col2:
                 st.markdown(f"{selected_agent.__class__.__name__}")
                 display_repo = repo_url.replace("git@github.com:", "github.com/").removesuffix(".git")
+                display_repo = display_repo.replace("https://", "")
                 st.markdown(
                     f"[{display_repo}](https://{display_repo})"
                     f" / [{branch}](https://{display_repo}/tree/{branch})\n"
