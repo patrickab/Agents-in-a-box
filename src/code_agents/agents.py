@@ -5,6 +5,7 @@ import git
 import os
 from pathlib import Path
 import shutil
+import subprocess
 from pydantic import Field
 import streamlit as st
 
