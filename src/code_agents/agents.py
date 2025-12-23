@@ -8,6 +8,7 @@ import git
 from pydantic import Field
 import streamlit as st
 
+from code_agents.agent_prompts import SYS_EMPTY, SYS_REFACTOR
 from code_agents.agents_core import AgentCommand, CodeAgent
 from code_agents.config import (
     DOCKERTAG_AIDER,
@@ -26,6 +27,11 @@ from code_agents.config import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_ARGS_AIDER = ["--dark-mode", "--code-theme", "inkpot", "--pretty"]
+
+AVAILABLE_PROMPTS = {
+    "<empty prompt>": SYS_EMPTY,
+    "refactor": SYS_REFACTOR,
+}
 
 
 def model_selector(key: str) -> dict:
@@ -143,7 +149,6 @@ class Gemini(CodeAgent[GeminiCommand]):
 class QwenCommand(AgentCommand):
     """Qwen-specific command definition."""
 
-    # Baseclass constants
     executable: str = "qwen"
 
 
@@ -168,7 +173,7 @@ class Codex(CodeAgent[CodexCommand]):
 class ClaudeCodeCommand(AgentCommand):
     """Claude Code-specific command definition."""
 
-    executable: str = "claude"  # adjust if your CLI entrypoint differs
+    executable: str = "claude"
 
 
 class ClaudeCode(CodeAgent[ClaudeCodeCommand]):
@@ -205,11 +210,7 @@ def get_remote_branches(repo_url: str) -> list[str]:
     """Extract branch names from remote repository."""
     try:
         lines = git.Git().ls_remote("--heads", repo_url).splitlines()
-        return [
-            ref.split("\t", 1)[1].replace("refs/heads/", "")
-            for ref in lines
-            if "\t" in ref
-        ]
+        return [ref.split("\t", 1)[1].replace("refs/heads/", "") for ref in lines if "\t" in ref]
     except git.GitCommandError as e:
         logger.error("Failed to fetch remote branches for %s: %s", repo_url, e)
         return []
@@ -320,10 +321,7 @@ def agent_controls() -> None:
 
             # If fetching branches failed, show error and stop
             if not branches:
-                st.error(
-                    "Unable to fetch branches for this repository. "
-                    "Please check that the URL is correct and accessible."
-                )
+                st.error("Unable to fetch branches for this repository. Please check that the URL is correct and accessible.")
                 return
 
             # Simple branch selection: user must choose an existing branch
@@ -343,11 +341,10 @@ def agent_controls() -> None:
             st.button("Initialize Agent", key="init_agent_button", on_click=init_agent)
 
     else:
-        execute_button = st.columns(1)
+
         selected_agent: CodeAgent[Any] = st.session_state.selected_agent
         repo_url = selected_agent.repo_url
         branch = selected_agent.branch
-
         st.markdown("# Agent Info")
         with st.expander("", expanded=True):
             col1, col2 = st.columns([1, 4])
@@ -361,33 +358,48 @@ def agent_controls() -> None:
                 st.markdown(
                     f"[{display_repo}](https://{display_repo})"
                     f" / [{branch}](https://{display_repo}/tree/{branch})\n"
-                    f"`{selected_agent.path_agent_workspace}`"
                 )
-            st.markdown("---")
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
+                st.markdown(f"`{selected_agent.path_agent_workspace}`")
+
+        st.markdown("---")
+
+        st.markdown("# General Control")
+        with st.expander("", expanded=True):
+            st.session_state.system_prompt = st.selectbox(
+                "System prompt",
+                list(AVAILABLE_PROMPTS.keys()),
+                key="prompt_select",
+            )
+            col_1, col_2 = st.columns(2)
+
+            with col_1:
+                sys_prompt = AVAILABLE_PROMPTS[st.session_state.system_prompt]
+                st.button(
+                    "Execute Agent",
+                    use_container_width=True,
+                    type="secondary",
+                    on_click=lambda: selected_agent.run(command=st.session_state.command, task=sys_prompt),
+                )
+
+            with col_2:
                 if st.button("Reset Agent", use_container_width=True):
                     del st.session_state.selected_agent
                     st.rerun()
-            with btn_col2:
-                if st.button("Sync Changes", use_container_width=True):
-                    count, target_root = sync_to_home(
-                        workspace=selected_agent.path_agent_workspace,
-                        repo_url=repo_url,
-                    )
-                    if count > 0:
-                        st.success(f"Copied {count} file(s) to `{target_root}`.")
-                    else:
-                        st.info("No changed files to sync.")
 
+            if st.button("Sync Agent Workspace", use_container_width=True):
+                count, target_root = sync_to_home(
+                    workspace=selected_agent.path_agent_workspace,
+                    repo_url=repo_url,
+                )
+                if count > 0:
+                    st.success(f"Copied {count} file(s) to `{target_root}`.")
+                else:
+                    st.info("No changed files to sync.")
+        st.markdown("---")
+
+        # Define command last to render UI controls last
         command: AgentCommand = selected_agent.ui_define_command()
-        with execute_button[0]:
-            st.button(
-                "Execute Command",
-                use_container_width=True,
-                type="primary",
-                on_click=lambda: selected_agent.run(command=command),
-            )
+        st.session_state.command = command
 
 
 def chat_interface() -> None:
@@ -406,9 +418,8 @@ def chat_interface() -> None:
 
         with st.chat_message("assistant"):
             selected_agent: CodeAgent[Any] = st.session_state.selected_agent
-            command: AgentCommand = selected_agent.ui_define_command()
 
-            selected_agent.run(task=task, command=command)
+            selected_agent.run(task=task+st.session_state.system_prompt, command=st.session_state.command)
             diff: str = selected_agent.get_diff()
             if diff:
                 st.markdown("### Git Diff")
@@ -442,7 +453,8 @@ def chat_interface() -> None:
 def main() -> None:
     """Main Streamlit application entrypoint."""
     st.set_page_config(page_title="Agents-in-a-Box", layout="wide")
-    agent_controls()
+    with st.sidebar:
+        agent_controls()
     chat_interface()
 
 
