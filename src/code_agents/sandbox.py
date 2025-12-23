@@ -43,12 +43,12 @@ Security Architecture - Defense in Depth
         Limits the container's ability to communicate with the internal network or move laterally to other services.
 """
 
-import os
+from pathlib import Path
 import subprocess
 from typing import Dict, Optional
 
 import docker
-from lib.logger import get_logger
+from lib.utils.logger import get_logger
 
 
 class SecurityEnvironmentError(Exception):
@@ -81,6 +81,20 @@ class DockerSandbox:
     (6) Daemon Isolation: Validates Rootless Docker.
     """
 
+    # Static configuration for immutable security defaults
+    _SANDBOX_OPTS = (
+        "--rm",
+        "--runtime=runsc", # Gvisor for syscall isolation
+        "--user", "0:0",   # Internal Root -> Host User 1000 (Rootless)
+        "--network", "bridge", # Isolated bridge network
+        f"--add-host=host.docker.internal:{SECURE_LOOPBACK_IP}", # Stable host access
+        "--dns", "8.8.8.8", # Public DNS to avoid leaking internal host info
+        "--cap-drop=ALL", # Drop all capabilities first...
+        "--cap-add=NET_ADMIN",
+        "--cap-add=NET_RAW",# ...selectively re-add necessary capabilities
+        "--security-opt", "no-new-privileges", # Enforce no new privileges
+    )
+
     def __init__(self, dockerimage_name: str) -> None:
         self.logger = get_logger()
         self.client = docker.from_env()
@@ -99,8 +113,7 @@ class DockerSandbox:
                     f"Secure Bridge IP {SECURE_LOOPBACK_IP} is missing. For Ollama Run: sudo ip addr add 10.200.200.1/32 dev lo"
                 )
 
-            security_opts = info.get("SecurityOptions", [])
-            if not any("rootless" in opt.lower() for opt in security_opts):
+            if not any("rootless" in opt.lower() for opt in info.get("SecurityOptions", [])):
                 raise SecurityEnvironmentError("Rootless Docker is not enabled. Daemon must run in rootless mode.")
 
             if "runsc" not in info.get("Runtimes", {}):
@@ -119,56 +132,34 @@ class DockerSandbox:
         Runs an interactive shell in the sandbox.
         Uses subprocess for the final 'run' call to ensure high-fidelity TTY hijacking.
         """
-        abs_repo_path = os.path.abspath(os.path.expanduser(repo_path))
-        os.makedirs(abs_repo_path, exist_ok=True)
+        work_dir = Path(repo_path).expanduser().resolve()
+        work_dir.mkdir(parents=True, exist_ok=True)
 
-        self.logger.info(f"Starting sandbox with image {self.dockerimage_name} at {abs_repo_path}")
+        self.logger.info(f"Starting sandbox with image {self.dockerimage_name} at {work_dir}")
 
-        # Constructing the docker run command
         cmd = [
             "docker",
             "run",
-            "-it",
-            "--rm",
-            "--runtime=runsc",
-            "--user",
-            "0:0",  # Internal Root -> Host User 1000 (Rootless)
-            "--network",
-            "bridge",
-            f"--add-host=host.docker.internal:{SECURE_LOOPBACK_IP}",
-            "--dns",
-            "8.8.8.8",
-            # --- SECURITY/CAPABILITY ADJUSTMENTS ---
-            # Drop everything first for security...
-            "--cap-drop=ALL",
-            # ...but add back ONLY what tcpdump needs to sniff traffic
-            "--cap-add=NET_ADMIN",
-            "--cap-add=NET_RAW",
-            "--security-opt",
-            "no-new-privileges",
-            # --- MOUNTS ---
-            "-v",
-            f"{abs_repo_path}:/workspace:z",
-            "-w",
-            "/workspace",
-            "-e",
+            "-it", # Interactive TTY
+            *self._SANDBOX_OPTS,
+            "-v", f"{work_dir}:/workspace:z",  # Bind mount for host-container sync
+            "-w", # Set working directory
+            "/workspace", # Github repo mounted
+            "-e", # Set HOME environment variable
             "HOME=/workspace",
         ]
 
-        # Add environment variables to the command
         if env_vars:
-            for key, value in env_vars.items():
-                cmd.extend(["-e", f"{key}={value}"])
+            cmd.extend([arg for k, v in env_vars.items() for arg in ("-e", f"{k}={v}")])
 
-        cmd.append(self.dockerimage_name)
-        cmd.append("/bin/bash")
+        cmd += [
+            self.dockerimage_name,
+            "/bin/bash",
+            "-c",
+            f"tcpdump -l -A -i eth0 > /workspace/network_traffic.log 2>&1 & sleep 1; {agent_cmd}",
+        ]
 
-        # Command to log network traffic from sandbox to host
-        # We use 'timeout' or backgrounding.
-        # Note: We sleep 1 to ensure tcpdump is listening before the agent starts.
-        wrapped_cmd = f"tcpdump -l -A -i eth0 > /workspace/network_traffic.log 2>&1 & sleep 1; {agent_cmd}"
-
-        cmd.extend(["-c", wrapped_cmd])
+        self.logger.info(f"Executing command: {' '.join(cmd)}")
 
         try:
             subprocess.run(cmd, check=True)
