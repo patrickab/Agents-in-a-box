@@ -375,11 +375,12 @@ def agent_controls() -> None:
 
             with col_1:
                 sys_prompt = AVAILABLE_PROMPTS[st.session_state.system_prompt]
+                task = None if sys_prompt == SYS_EMPTY else sys_prompt
                 st.button(
                     "Execute Agent",
                     use_container_width=True,
                     type="secondary",
-                    on_click=lambda: selected_agent.run(command=st.session_state.command, task=sys_prompt),
+                    on_click=lambda: selected_agent.run(command=st.session_state.command, task=task),
                 )
 
             with col_2:
@@ -420,7 +421,12 @@ def chat_interface() -> None:
         with st.chat_message("assistant"):
             selected_agent: CodeAgent[Any] = st.session_state.selected_agent
 
-            selected_agent.run(task=task+st.session_state.system_prompt, command=st.session_state.command)
+            sys_prompt = AVAILABLE_PROMPTS[st.session_state.system_prompt]
+
+            if sys_prompt != SYS_EMPTY:
+                task = "<SYSTEM PROMPT>\n" + sys_prompt + "\n</SYSTEM PROMPT>" + "\n\n" + "<USER PROMPT>\n" + task + "\n</USER PROMPT>"
+
+            selected_agent.run(task=task, command=st.session_state.command)
             diff: str = selected_agent.get_diff()
             if diff:
                 st.markdown("### Git Diff")
