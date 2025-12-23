@@ -1,6 +1,5 @@
 from typing import Any, ClassVar, List, Literal, Optional
 
-import logging
 import git
 from pydantic import Field
 import streamlit as st
@@ -19,8 +18,6 @@ from code_agents.config import (
     MODELS_OPENAI,
     MODELS_VLLM,
 )
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_ARGS_AIDER = ["--dark-mode", "--code-theme", "inkpot", "--pretty"]
 
@@ -200,15 +197,8 @@ def get_agent(agent_type: str, repo_url: str, branch: str) -> CodeAgent[Any]:
 
 def get_remote_branches(repo_url: str) -> list[str]:
     """Extract branch names from remote repository."""
-    try:
-        lines = git.Git().ls_remote("--heads", repo_url).splitlines()
-        return [ref.split("\t", 1)[1].replace("refs/heads/", "") for ref in lines if "\t" in ref]
-    except git.GitCommandError as e:
-        logger.error("Failed to fetch remote branches for %s: %s", repo_url, e)
-        return []
-    except Exception as e:
-        logger.exception("Unexpected error while fetching remote branches for %s", repo_url)
-        return []
+    lines = git.Git().ls_remote("--heads", repo_url).splitlines()
+    return [ref.split("\t", 1)[1].replace("refs/heads/", "") for ref in lines]
 
 
 def agent_controls() -> None:
@@ -220,22 +210,10 @@ def agent_controls() -> None:
         repo_url = st.text_input("GitHub Repository URL", key="repo_url")
         if repo_url:
             if "branches" not in st.session_state or st.session_state.cached_repo_url != repo_url:
-                st.session_state.branches = get_remote_branches(repo_url)
+                with st.spinner("Fetching branches..."):
+                    st.session_state.branches = get_remote_branches(repo_url)
                 st.session_state.cached_repo_url = repo_url
-
-            if not st.session_state.branches:
-                st.error(
-                    "Unable to fetch branches for this repository. "
-                    "Please check that the URL is correct and accessible."
-                )
-                return
-
-            branch = st.selectbox(
-                "Select Branch",
-                options=st.session_state.branches,
-                index=0,
-                key="branch_selector",
-            )
+            branch = st.selectbox("Select Branch", options=st.session_state.branches, index=0, key="branch_selector")
 
         def init_agent() -> None:
             """Initialize and store agent in session state."""
