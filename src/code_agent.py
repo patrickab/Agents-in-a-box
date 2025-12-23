@@ -605,7 +605,6 @@ def agent_controls() -> None:
             if repo_url and branch:
                 st.button("Initialize Agent", key="init_agent_button", on_click=init_agent)
 
-
     else:
         execute_button = st.columns(1)
         selected_agent: CodeAgent[Any] = st.session_state.selected_agent
@@ -638,6 +637,7 @@ def agent_controls() -> None:
                 on_click=lambda: selected_agent.run(command=command),
             )
 
+
 def chat_interface() -> None:
     """Streamlit chat interface for code agents."""
     with st._bottom:
@@ -663,4 +663,4 @@ def chat_interface() -> None:
 if __name__ == "__main__":
     st.set_page_config(page_title="Agents-in-a-Box", layout="wide")
     agent_controls()
-    chat_interface()  
+    chat_interface()

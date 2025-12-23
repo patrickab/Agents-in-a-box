@@ -1,132 +1,115 @@
-# Agent-in-a-Box
+# Agents-in-a-Box
 
-**Agent-in-a-Box** is a secure orchestration layer that wraps arbitrary agents into a unified sandboxed, ephemeral runtime. It allows developers to deploy agents against local repositories with **rootless containerization**, **kernel-level isolation**, and **strict network perimeter control**.
+**Secure orchestration layer for autonomous coding agents.** Wraps CLI agents into a heavily restricted, ephemeral, and sandboxed runtime.
 
 **Supported Agents:**
+*   [Open Code](https://opencode.ai/)
 *   [Aider](https://aider.chat/)
 *   [Gemini CLI](https://github.com/google-gemini/gemini-cli)
 *   [Qwen Code](https://github.com/QwenLM/qwen-code)
+*   [Codex](https://github.com/openai/codex)
+*   [Claude Code](https://github.com/anthropics/claude-code)
+*   [Cursor CLI](https://cursor.com/agents)
+
+Supports CPU/GPU local inference by linking the Docker subnet to a static alias.
+
+https://github.com/user-attachments/assets/e57c43c6-4791-4bf8-a877-793d286880f2
 
 ---
 
 ## 🎯 Purpose
 
-State-of-the-art coding agents are designed for friction-free adoption, typically running directly on the host machine with the full privileges of the active user.
+Code agents typically run directly on the host machine with full user privileges
 
-Default configuration:
-*   **Unrestricted Filesystem Access:** Agents can read, modify, or delete any file accessible to the user.
-*   **Arbitrary Code Execution:** Generate & execute scripts (Python, Bash).
-*   **Network Access:** Allow arbitrary network traffic - While the supported Agents always ask for permission before contacting a website, they technically have the capability to send any data to any publicly accessible domain. They can also install arbitrary software in your binaries.
+By default this means:
+*   **Arbitrary Code Generation & Execution**
+*   **Unrestricted Filesystem Access**
+*   **Unrestricted Network Access**
 
-**Agent-in-a-Box** mitigates this operational risk by decoupling the agent from the host. It functions as a containment layer, providing a unified, ergonomic interface to orchestrate these tools within a heavily restricted runtime with supervised network traffic.
-
----
-
-## 🛡️ Security Architecture
-
-### **Zero-Trust Execution Policy**
-
-Agent-in-a-Box treats any AI agent as an untrusted entity with intent of malicious code execution. It enforces a **Zero-Trust** policy using a multi-layered defense strategy.
-
-### 1. Rootless Infrastructure
-Excludes any potential of container breakout attacks by removing root privileges from the container.
-*   **Unprivileged Daemon:** The Docker Engine runs without root privileges on the host.
-*   **Identity Mapping:** Utilizes user namespaces to map the container's `root` user to a non-privileged user on the host. Even in the event of a container breakout, the attacker finds themselves with zero permissions on the host filesystem.
-
-### 2. Kernel-Level Isolation (gVisor)
-Standard containers share the host kernel, leaving a surface for syscall exploits. This project integrates **gVisor (runsc)** to virtualize the system call interface.
-*   **Interception of System Calls:** gVisor handles application systemcalls in a distinct, user-space kernel. Any system call with system-level privileges is automatically rejected.
-*   **Attack Surface Reduction:** This creates a robust boundary between the untrusted application and the actual host kernel, preventing deep-system kernel exploits.
-
-### 3. Network Perimeter Control
-*   **Traffic Segregation:** Containers are isolated on strict bridge networks.
-*   **Exfiltration Prevention:** Firewall rules limit the container's ability to scan internal networks or move laterally to other services.
-
-### 4. Secure Host Bridge (Digital Air-Gap)
-*   **Loopback Isolation:** Host-Container communication is routed via a static loopback alias (`10.200.200.1`). Traffic is air-gapped from physical interfaces (Wi-Fi/Eth), preventing accidental LAN exposure.
-*   **Deterministic Firewalling:** Access is strictly controlled via UFW rules linking the Docker subnet to the static alias, independent of host network changes.
+While the supported Frameworks ask for permission before visiting a website or modifying files, they can technically send any user-accessible (private) data to any publicly accessible domain or download & install arbitrary software in the userspace.
 
 ---
 
-## 🏗️ System Architecture
+## 🛡️ Security Architecture: **Defense-in-Depth**
+This project mitigates risk by enforcing a **Zero-Trust policy** under assumption of malicious intent.
 
-The core philosophy is **Isolation by Default**. The system wraps any CLI agent into an abstract `CodeAgent` class.
+**1. Kernel & Container Isolation**
+Even in the event of a container breakout, the attacker finds themselves with zero permissions on the host filesystem.
 
-1.  **Workspace Provisioning:** A temporary directory (`~/agent_sandbox/<repo>`) is created on the host.
-2.  **Ephemeral Runtime:** A Docker container is launched using a pre-baked, immutable image specific to the chosen agent.
-3.  **Bind-Mounting:** The host workspace is mounted into the container.
-    *   *Persistence:* Code changes are written to the mounted directory.
-    *   *Containment:* The agent cannot access any path outside this specific mount.
-4.  **Interactive Session:** The container launches in interactive mode, bridging the user's terminal to the sandboxed agent.
-5.  **Cleanup:** Upon exit, the container is destroyed. Only the modified code artifacts remain on the host.
+*   **[Rootless Docker](https://docs.docker.com/engine/security/rootless/):** Utilizes user namespaces to map the container's `root` user to a non-privileged user on the host.
+*   **[gVisor (runsc)](https://github.com/google/gvisor):** Intercepts system calls in a distinct user-space kernel - rejects syscalls with system-level privileges.
 
-### Key Guarantees
-*   **Filesystem Integrity:** The agent has **no access** to the host filesystem outside the specific bind-mounted sandbox.
-*   **Side-Effect Containment:** Arbitrary code execution (e.g., `rm -rf /`) or network calls (e.g., `curl malicious.site`) are contained entirely within the disposable container.
-*   **Cross-Agent Isolation:** Each agent runs on a dedicated Docker image defined in `dockerconfig`. Vulnerabilities in "Agent A" cannot contaminate the environment of "Agent B."
+**2. Network Perimeter & Logical Air-Gap**
+*   **Egress Control:** Strict firewall rules prevent lateral movement or internal network scanning.
+*   **Secure Bridging to localhost without network exposure**
+    *   Enables secure CPU/GPU inference.
+    *   Assigns static IP `10.200.200.1` to the host loopback (non-routable via Wi-Fi/Eth).
+    *   UFW allows traffic *only* from the Docker subnet (`172.17.0.0/16`) to the alias.
+
+```mermaid
+graph TD
+    subgraph Host["Host Machine (User Space)"]
+        UI[Streamlit Orchestrator]
+        Git[Local Git Repo]
+        LLM[Local LLM / Ollama]
+        
+        subgraph NetControl["🛡️ Network Gatekeeper"]
+            Firewall[UFW / Bridge Alias]
+        end
+
+        subgraph Isolation["Runtime Environment"]
+            Docker[Rootless Docker]
+            gVisor["gVisor (runsc)"]
+            
+            subgraph Container["🐳 Docker Sandbox"]
+                Agent[Agent Process]
+                Mount[Bind-Mounted Codebase]
+            end
+        end
+    end
+    
+    WWW[World Wide Web]
+
+    %% Control Flow
+    UI -->|1. Spawns| Docker
+    Docker -->|2. Wraps| gVisor
+    gVisor -->|3. Isolates| Agent
+    
+    %% Data Flow
+    Agent <-->|Read/Write| Mount
+    Mount <-->|Sync| Git
+    
+    %% Network Routing (Interception)
+    Agent -.->|Traffic Out| Firewall
+    Firewall -.->|Allow: 10.200.x.x| LLM
+    Firewall -.->|Allow: Whitelist| WWW
+```
 
 ---
 
 ## 🔌 Extensibility
-
-Agent-in-a-Box is designed as a framework, not a tool. Adding a new CLI agent requires zero changes to the core logic.
-
-*   **Step 1:** Inherit from the abstract `CodeAgent` base class.
-*   **Step 2:** Define a **Pydantic model** for the agent's specific command-line arguments.
-*   **Step 3:** Create a minimal Streamlit UI component to populate that model.
-
-The system supports both GUI-driven execution and headless Python scripting via the Pydantic command models.
-
----
-
-## 💻 Local Inference & Secure Bridging
-
-To allow the sandboxed agent to communicate with local LLM servers (e.g., Ollama) without exposing the host to the local area network (LAN), we utilize a **Logical Air-Gap**.
-
-### The Loopback Strategy
-Instead of binding services to `0.0.0.0` (all interfaces), we create a static alias on the loopback interface.
-
-1.  **Traffic Isolation:** We assign a static IP (`10.200.200.1`) to the host's loopback device. This IP is not routable from physical interfaces (Wi-Fi/Ethernet).
-2.  **Deterministic Firewalling:** We use UFW to strictly allow traffic *only* from the Docker subnet (`172.17.0.0/16`) to this specific alias.
-
-**Network Flow:**
-`Container (172.17.x.x)` $\to$ `Host Loopback Alias (10.200.200.1)` $\to$ `Ollama Service`
-
-This ensures that while the container can access the LLM, the LLM service remains invisible to the outside world.
+Designed as a framework using the **Strategy Pattern**.
+*   **Core Logic:** Abstract `CodeAgent` base class handles lifecycle management.
+*   **Implementation:** New agents require only a class inheritance and a **Pydantic model** for CLI argument validation.
 
 ---
 
 ## 🚀 Usage
 
-### 1. Infrastructure Setup
-Initialize the security layer (Rootless Docker context & gVisor configuration).
-
+**1. Infrastructure & Build**
 ```bash
-./scripts/setup-agent-sandbox.sh
+./scripts/setup-agent-sandbox.sh       # Init Rootless Docker & gVisor
+python src/docker/dockerimage-bakery.py # Compile immutable agent images
 ```
 
-### 2. Image Build Pipeline
-Compile the immutable Docker images for your configured agents.
-
+**2. Network Bridge (Optional for Local Inference)**
 ```bash
-python src/docker/dockerimage-bakery.py
-```
-
-### 3. Network Configuration (Optional for Local LLMs)
-If running local inference, establish the secure loopback bridge:
-
-```bash
-# 1. Create Loopback Alias
+# Create non-routable alias & allow Docker subnet access
 sudo ip addr add 10.200.200.1/32 dev lo
-
-# 2. Configure Firewall (Allow Docker Subnet -> Alias)
-sudo ufw allow from 172.17.0.0/16 to 10.200.200.1 port 11434 proto tcp comment 'Secure Sandbox Bridge'
-sudo ufw reload
+sudo ufw allow from 172.17.0.0/16 to 10.200.200.1 port 11434 proto tcp
 ```
 
-### 4. Run
-Launch the orchestration UI:
-
+**3. Run Orchestrator**
 ```bash
 streamlit run src/app.py
 ```
