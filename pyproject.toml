@@ -17,6 +17,9 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[project.scripts]
+agent-box = "code_agents.code_agents:main" 
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/code_agents"]
 

@@ -640,6 +640,11 @@ def agent_controls() -> None:
 
 def chat_interface() -> None:
     """Streamlit chat interface for code agents."""
+
+    if "selected_agent" not in st.session_state:
+        st.info("Please select and initialize an agent first.")
+        return
+
     with st._bottom:
         task: Optional[str] = st.chat_input("Assign a task to the agent...")
 
@@ -659,8 +664,11 @@ def chat_interface() -> None:
             else:
                 st.info("No changes detected in git diff.")
 
-
-if __name__ == "__main__":
+def main() -> None:
+    """Main Streamlit application entrypoint."""
     st.set_page_config(page_title="Agents-in-a-Box", layout="wide")
     agent_controls()
     chat_interface()
+
+if __name__ == "__main__":
+    main()

@@ -1,2 +1,2 @@
 #!/bin/sh
-streamlit run  src/code_agents/code_agents.py
+streamlit run  src/code_agents/agents.py
