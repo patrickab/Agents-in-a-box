@@ -48,7 +48,6 @@ import subprocess
 from typing import Dict, Optional
 
 import docker
-
 from lib.logger import get_logger
 
 

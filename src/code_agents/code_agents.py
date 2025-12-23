@@ -4,11 +4,6 @@ from pathlib import Path
 import subprocess
 from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
-import git
-from llm_baseclient.config import OLLAMA_PORT
-from pydantic import BaseModel, Field
-import streamlit as st
-
 from config import (
     DOCKERTAG_AIDER,
     DOCKERTAG_CLAUDE,
@@ -22,7 +17,11 @@ from config import (
     MODELS_OPENAI,
     MODELS_VLLM,
 )
+import git
+from llm_baseclient.config import OLLAMA_PORT
+from pydantic import BaseModel, Field
 from sandbox import DockerSandbox
+import streamlit as st
 
 GIT_NAME = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True).stdout.strip()
 GIT_EMAIL = subprocess.run(["git", "config", "--global", "user.email"], capture_output=True, text=True).stdout.strip()
