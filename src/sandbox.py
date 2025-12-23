@@ -49,7 +49,7 @@ from typing import Dict, Optional
 
 import docker
 
-from logger import get_logger
+from lib.logger import get_logger
 
 
 class SecurityEnvironmentError(Exception):
@@ -170,7 +170,6 @@ class DockerSandbox:
         wrapped_cmd = f"tcpdump -l -A -i eth0 > /workspace/network_traffic.log 2>&1 & sleep 1; {agent_cmd}"
 
         cmd.extend(["-c", wrapped_cmd])
-        self.logger.info(f"Executing command: {' '.join(cmd)}")
 
         try:
             subprocess.run(cmd, check=True)
