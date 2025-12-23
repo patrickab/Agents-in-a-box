@@ -48,7 +48,8 @@ import subprocess
 from typing import Dict, Optional
 
 import docker
-from lib.utils.logger import get_logger
+
+from code_agents.lib.logger import get_logger
 
 
 class SecurityEnvironmentError(Exception):
