@@ -301,45 +301,42 @@ def agent_controls() -> None:
             is_ssh = repo_url.startswith("git@")
 
             if is_ssh:
-                # Allow free-text input for branch name
+                # Single free-text input; user can type existing or new branch
                 branch_input = st.text_input(
-                    "Branch (select existing or type a new branch name)",
+                    "Branch (existing or new)",
                     value=branches[0] if branches else "",
                     key="branch_text_input",
+                    help="Type an existing branch name or a new one to create.",
                 )
-                # Provide a dropdown of existing branches for convenience
-                selected_existing = st.selectbox(
-                    "Existing branches",
-                    options=branches,
-                    index=0,
-                    key="branch_selector",
-                )
+                branch_input = branch_input.strip()
 
-                # If user leaves the text input empty, use the selected existing branch
-                if branch_input.strip() == "":
-                    branch = selected_existing
-                elif branch_input.strip() in branches:
-                    branch = branch_input.strip()
+                if not branch_input:
+                    branch = None
+                elif branch_input in branches:
+                    # Existing branch: just use it
+                    branch = branch_input
                 else:
-                    # New branch name entered: create it on the remote
-                    new_branch = branch_input.strip()
-                    if st.button(f"Create and use new branch '{new_branch}'", key="create_branch_button"):
+                    # New branch: create on remote if not already created this run
+                    new_branch = branch_input
+                    # Avoid re-creating if user re-runs; cache success in session_state
+                    cache_key = f"created_branch::{repo_url}::{new_branch}"
+                    if not st.session_state.get(cache_key):
                         with st.spinner(f"Creating branch '{new_branch}' on remote..."):
                             success = create_remote_branch(repo_url, new_branch)
                         if success:
+                            st.session_state[cache_key] = True
                             st.success(f"Branch '{new_branch}' created.")
-                            # Refresh branches and set current branch
+                            # Refresh branches
                             with st.spinner("Refreshing branches..."):
                                 st.session_state.branches = get_remote_branches(repo_url)
                             branches = st.session_state.branches
-                            if new_branch not in branches:
-                                branches.append(new_branch)
-                            branch = new_branch
                         else:
                             st.error(f"Failed to create branch '{new_branch}'. Please check your SSH access.")
                             branch = None
-                    else:
-                        branch = None
+                            # Do not proceed to Initialize Agent
+                            return
+
+                    branch = new_branch
             else:
                 # Non-SSH: only allow selecting existing branches
                 branch = st.selectbox(
