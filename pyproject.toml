@@ -1,5 +1,5 @@
 [project]
-name = "Agent-in-a-box"
+name = "Agents-in-a-box"
 version = "0.1.0"
 description = "Standalone secure code agent with Docker sandboxing"
 readme = "README.md"
