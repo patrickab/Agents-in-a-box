@@ -391,7 +391,7 @@ class CodeAgent(ABC, Generic[TCommand]):
         raise NotImplementedError(f"Could not determine command class for {self.__class__.__name__}")
 
     def ui_define_command(self) -> TCommand:
-        """Generic UI definition that uses pydantic model to auto-generate UI elements."""
+        """Generic UI definition for automatic inheritance of UI elements."""
         command_class = self.get_command_class()
         st.markdown(f"# {self.__class__.__name__} Command")
         with st.expander("", expanded=True):

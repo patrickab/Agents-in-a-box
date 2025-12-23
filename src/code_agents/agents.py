@@ -1,11 +1,10 @@
-from typing import Any, ClassVar, List, Literal, Optional
-
 import logging
-import git
-import os
 from pathlib import Path
 import shutil
 import subprocess
+from typing import Any, ClassVar, List, Literal, Optional
+
+import git
 from pydantic import Field
 import streamlit as st
 
@@ -74,7 +73,7 @@ class AiderCommand(AgentCommand):
 
 
 class Aider(CodeAgent[AiderCommand]):
-    """Aider Code Agent."""
+    """Aider Code Agent - example for overridability."""
 
     DOCKERTAG = DOCKERTAG_AIDER
 
@@ -231,7 +230,7 @@ def get_changed_files(workspace: Path) -> list[Path]:
     return [workspace / f for f in files]
 
 
-def copy_changed_files_to_home(workspace: Path, repo_url: str) -> tuple[int, Path]:
+def sync_to_home(workspace: Path, repo_url: str) -> tuple[int, Path]:
     """
     Copy all changed files from the agent workspace to a mirror repo under the user's home.
 
@@ -263,13 +262,13 @@ def copy_changed_files_to_home(workspace: Path, repo_url: str) -> tuple[int, Pat
     return copied, target_root
 
 
-def sync_and_commit_to_home(workspace: Path, repo_url: str, message: str) -> tuple[bool, str]:
+def commit_to_home(workspace: Path, repo_url: str, message: str) -> tuple[bool, str]:
     """
     Sync changed files to the user's home repo and commit them.
 
     Returns (success, message).
     """
-    copied, target_root = copy_changed_files_to_home(workspace=workspace, repo_url=repo_url)
+    copied, target_root = sync_to_home(workspace=workspace, repo_url=repo_url)
     if copied == 0:
         return False, "No changed files to sync; nothing to commit."
 
@@ -369,12 +368,11 @@ def agent_controls() -> None:
                     del st.session_state.selected_agent
                     st.rerun()
             with btn_col2:
-                if st.button("Sync Changes to Home", use_container_width=True):
-                    with st.spinner("Copying changed files to home repository..."):
-                        count, target_root = copy_changed_files_to_home(
-                            workspace=selected_agent.path_agent_workspace,
-                            repo_url=repo_url,
-                        )
+                if st.button("Sync Changes", use_container_width=True):
+                    count, target_root = sync_to_home(
+                        workspace=selected_agent.path_agent_workspace,
+                        repo_url=repo_url,
+                    )
                     if count > 0:
                         st.success(f"Copied {count} file(s) to `{target_root}`.")
                     else:
@@ -426,7 +424,7 @@ def chat_interface() -> None:
                         st.warning("Please enter a commit message.")
                     else:
                         with st.spinner("Syncing and committing changes to home repository..."):
-                            success, msg = sync_and_commit_to_home(
+                            success, msg = commit_to_home(
                                 workspace=selected_agent.path_agent_workspace,
                                 repo_url=selected_agent.repo_url,
                                 message=commit_msg.strip(),
