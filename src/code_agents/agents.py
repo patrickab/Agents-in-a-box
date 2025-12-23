@@ -347,8 +347,6 @@ def agent_controls() -> None:
         selected_agent: CodeAgent[Any] = st.session_state.selected_agent
         repo_url = selected_agent.repo_url
         branch = selected_agent.branch
-        repo_slug = "/".join(repo_url.split("/")[-2:])  # Extracts 'owner/repo'
-        branch_url = f"{repo_url}/tree/{branch}"
 
         st.markdown("# Agent Info")
         with st.expander("", expanded=True):
@@ -359,9 +357,13 @@ def agent_controls() -> None:
                 st.write("**Workspace**")
             with col2:
                 st.markdown(f"{selected_agent.__class__.__name__}")
-                st.markdown(f"[{repo_slug}]({repo_url}) / [{branch}]({branch_url})")
-                st.markdown(f"`{selected_agent.path_agent_workspace}`")
-
+                display_repo = repo_url.replace("git@github.com:", "github.com/").removesuffix(".git")
+                st.markdown(
+                    f"[{display_repo}](https://{display_repo})"
+                    f" / [{branch}](https://{display_repo}/tree/{branch})\n"
+                    f"`{selected_agent.path_agent_workspace}`"
+                )
+            st.markdown("---")
             btn_col1, btn_col2 = st.columns(2)
             with btn_col1:
                 if st.button("Reset Agent", use_container_width=True):
