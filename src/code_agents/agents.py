@@ -1,7 +1,6 @@
 from typing import Any, ClassVar, List, Literal, Optional
 
 import logging
-import subprocess
 import git
 import os
 from pathlib import Path
@@ -219,63 +218,6 @@ def get_remote_branches(repo_url: str) -> list[str]:
         return []
 
 
-def create_remote_branch(repo_url: str, branch_name: str) -> bool:
-    """
-    Create a new branch on the remote by:
-    - cloning the repo into a temporary directory,
-    - creating the branch from the default branch,
-    - pushing the new branch.
-    Returns True on success, False on failure.
-    """
-    import tempfile
-    from pathlib import Path
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            # Clone bare minimum
-            subprocess.run(
-                ["git", "clone", "--origin", "origin", repo_url, str(tmp_path)],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            # Determine default branch
-            result = subprocess.run(
-                ["git", "-C", str(tmp_path), "symbolic-ref", "refs/remotes/origin/HEAD"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            default_ref = result.stdout.strip()
-            default_branch = default_ref.split("/")[-1]
-
-            # Create new branch from default branch
-            subprocess.run(
-                ["git", "-C", str(tmp_path), "checkout", "-b", branch_name, f"origin/{default_branch}"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-
-            # Push new branch
-            subprocess.run(
-                ["git", "-C", str(tmp_path), "push", "origin", branch_name],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error("Failed to create remote branch %s on %s: %s", branch_name, repo_url, e)
-        return False
-    except Exception:
-        logger.exception("Unexpected error while creating remote branch %s on %s", branch_name, repo_url)
-        return False
-
-
 def get_changed_files(workspace: Path) -> list[Path]:
     """Return list of paths (absolute) for files changed vs HEAD."""
     result = subprocess.run(
@@ -384,53 +326,13 @@ def agent_controls() -> None:
                 )
                 return
 
-            is_ssh = repo_url.startswith("git@")
-
-            if is_ssh:
-                # Single free-text input; user can type existing or new branch
-                branch_input = st.text_input(
-                    "Branch (existing or new)",
-                    value=branches[0] if branches else "",
-                    key="branch_text_input",
-                    help="Type an existing branch name or a new one to create.",
-                )
-                branch_input = branch_input.strip()
-
-                if not branch_input:
-                    branch = None
-                elif branch_input in branches:
-                    # Existing branch: just use it
-                    branch = branch_input
-                else:
-                    # New branch: create on remote if not already created this run
-                    new_branch = branch_input
-                    # Avoid re-creating if user re-runs; cache success in session_state
-                    cache_key = f"created_branch::{repo_url}::{new_branch}"
-                    if not st.session_state.get(cache_key):
-                        with st.spinner(f"Creating branch '{new_branch}' on remote..."):
-                            success = create_remote_branch(repo_url, new_branch)
-                        if success:
-                            st.session_state[cache_key] = True
-                            st.success(f"Branch '{new_branch}' created.")
-                            # Refresh branches
-                            with st.spinner("Refreshing branches..."):
-                                st.session_state.branches = get_remote_branches(repo_url)
-                            branches = st.session_state.branches
-                        else:
-                            st.error(f"Failed to create branch '{new_branch}'. Please check your SSH access.")
-                            branch = None
-                            # Do not proceed to Initialize Agent
-                            return
-
-                    branch = new_branch
-            else:
-                # Non-SSH: only allow selecting existing branches
-                branch = st.selectbox(
-                    "Select Branch",
-                    options=branches,
-                    index=0,
-                    key="branch_selector",
-                )
+            # Simple branch selection: user must choose an existing branch
+            branch = st.selectbox(
+                "Select Branch",
+                options=branches,
+                index=0,
+                key="branch_selector",
+            )
 
         def init_agent() -> None:
             """Initialize and store agent in session state."""

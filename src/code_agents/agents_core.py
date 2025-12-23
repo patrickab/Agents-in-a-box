@@ -254,9 +254,54 @@ class CodeAgent(ABC, Generic[TCommand]):
             )
         else:
             subprocess.run(
-                ["git", "clone", "--branch", branch, repo_url, str(workspace)],
+                ["git", "clone", repo_url, str(workspace)],
                 check=False,
             )
+
+        # Ensure we have up-to-date remote refs
+        subprocess.run(
+            ["git", "-C", str(workspace), "fetch", "origin"],
+            check=False,
+        )
+
+        # Try to checkout the requested branch; if it doesn't exist, create it from default branch
+        checkout_result = subprocess.run(
+            ["git", "-C", str(workspace), "checkout", branch],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if checkout_result.returncode != 0:
+            # Branch does not exist locally; try to create it from the remote default branch
+            # Determine default branch from origin/HEAD
+            default_ref_result = subprocess.run(
+                ["git", "-C", str(workspace), "symbolic-ref", "refs/remotes/origin/HEAD"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if default_ref_result.returncode == 0:
+                default_ref = default_ref_result.stdout.strip()
+                default_branch = default_ref.split("/")[-1]
+            else:
+                # Fallback: assume 'main' if we cannot detect default
+                default_branch = "main"
+
+            # Create new branch from origin/<default_branch>
+            create_result = subprocess.run(
+                ["git", "-C", str(workspace), "checkout", "-b", branch, f"origin/{default_branch}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            if create_result.returncode != 0:
+                # As a last resort, try creating from local default_branch (if exists)
+                subprocess.run(
+                    ["git", "-C", str(workspace), "checkout", "-b", branch, default_branch],
+                    check=False,
+                )
 
         self._try_install_dependencies(workspace)
         return workspace
