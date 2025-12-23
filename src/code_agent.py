@@ -40,6 +40,7 @@ ENV_VARS = {
 
 DEFAULT_ARGS_AIDER = ["--dark-mode", "--code-theme", "inkpot", "--pretty"]
 
+
 def model_selector(key: str) -> dict:
     """Create model selection dropdowns in Streamlit sidebar expanders."""
     model_options = []
@@ -73,6 +74,7 @@ def model_selector(key: str) -> dict:
         format_func=lambda model: model.replace(litellm_prefix, ""),
         key=f"{selected_provider}_model_select_{key}",
     )
+
 
 class AgentCommand(BaseModel, ABC):
     """Base command model for external agent processes.
@@ -217,8 +219,6 @@ class CodeAgent(ABC, Generic[TCommand]):
             subprocess.run(
                 cmd,
                 cwd=workspace,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
                 check=False,
             )
         except OSError:
@@ -319,7 +319,7 @@ class Aider(CodeAgent[AiderCommand]):
 
         st.markdown("---")
         st.markdown("# Command Control")
-        with st.expander("", expanded=True):
+        with st.expander("", expanded=False):
             edit_format = st.selectbox("Select Edit Format", ["diff", "whole", "udiff"], index=0, key="aider_edit_format")
             map_tokens = st.selectbox("Context map tokens", [1024, 2048, 4096, 8192], index=0, key="aider_map_tokens")
 
@@ -584,67 +584,62 @@ def get_remote_branches(repo_url: str) -> list[str]:
     return [ref.split("\t")[1].replace("refs/heads/", "") for ref in git.Git().ls_remote("--heads", repo_url).splitlines()]
 
 
-def main() -> None:
+def agent_controls() -> None:
     """Streamlit entrypoint for multi-agent code workspace."""
-    st.set_page_config(page_title="Agent-in-a-Box", layout="wide")
 
-    with st.sidebar:
-        if "selected_agent" not in st.session_state:
-            st.markdown("## Agent Controls")
-            selected_agent_name: str = st.selectbox("Select Code Agent", options=agent_subclass_names, key="code_agent_selector")
-            repo_url = st.text_input("GitHub Repository URL", value="https://github.com/patrickab/gigachad-bot", key="repo_url")
-            if repo_url:
-                if "branches" not in st.session_state:
-                    st.session_state.branches = get_remote_branches(repo_url)
+    if "selected_agent" not in st.session_state:
+        st.markdown("## Agent Controls")
+        selected_agent_name: str = st.selectbox("Select Code Agent", options=agent_subclass_names, key="code_agent_selector")
+        repo_url = st.text_input("GitHub Repository URL", key="repo_url")
+        if repo_url:
+            if "branches" not in st.session_state or st.session_state.cached_repo_url != repo_url:
+                st.session_state.branches = get_remote_branches(repo_url)
+                st.session_state.cached_repo_url = repo_url
+            branch = st.selectbox("Select Branch", options=st.session_state.branches, index=0, key="branch_selector")
 
-                branch = st.selectbox("Select Branch", options=st.session_state.branches, index=0, key="branch_selector")
-
-            def init_agent() -> None:
-                """Initialize and store agent in session state."""
-                selected_agent: CodeAgent[Any] = get_agent(agent_type=selected_agent_name, repo_url=repo_url, branch=branch)
-                st.session_state.selected_agent = selected_agent
+        def init_agent() -> None:
+            """Initialize and store agent in session state."""
+            selected_agent: CodeAgent[Any] = get_agent(agent_type=selected_agent_name, repo_url=repo_url, branch=branch)
+            st.session_state.selected_agent = selected_agent
 
             if repo_url and branch:
                 st.button("Initialize Agent", key="init_agent_button", on_click=init_agent)
 
-        else:
-            execute_button = st.columns(1)
 
-            selected_agent: CodeAgent[Any] = st.session_state.selected_agent
+    else:
+        execute_button = st.columns(1)
+        selected_agent: CodeAgent[Any] = st.session_state.selected_agent
+        repo_url = selected_agent.repo_url
+        branch = selected_agent.branch
+        repo_slug = "/".join(repo_url.split("/")[-2:])  # Extracts 'owner/repo'
+        branch_url = f"{repo_url}/tree/{branch}"
 
-            # Data Extraction
-            repo_url = selected_agent.repo_url
-            branch = selected_agent.branch
-            repo_slug = "/".join(repo_url.split("/")[-2:])  # Extracts 'owner/repo'
-            branch_url = f"{repo_url}/tree/{branch}"
+        st.markdown("# Agent Info")
+        with st.expander("", expanded=True):
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                st.write("**Agent**")
+                st.write("**Source**")
+                st.write("**Workspace**")
+            with col2:
+                st.markdown(f"{selected_agent.__class__.__name__}")
+                st.markdown(f"[{repo_slug}]({repo_url}) / [{branch}]({branch_url})")
+                st.markdown(f"`{selected_agent.path_agent_workspace}`")
+            if st.button("Reset Agent", use_container_width=True):
+                del st.session_state.selected_agent
+                st.rerun()
 
-            st.markdown("# Agent Info")
-            with st.expander("", expanded=True):
-                col1, col2 = st.columns([1, 4])
+        command: AgentCommand = selected_agent.ui_define_command()
+        with execute_button[0]:
+            st.button(
+                "Execute Command",
+                use_container_width=True,
+                type="primary",
+                on_click=lambda: selected_agent.run(command=command),
+            )
 
-                with col1:
-                    st.write("**Agent**")
-                    st.write("**Source**")
-                    st.write("**Workspace**")
-
-                with col2:
-                    st.markdown(f"{selected_agent.__class__.__name__}")
-                    st.markdown(f"[{repo_slug}]({repo_url}) / [{branch}]({branch_url})")
-                    st.markdown(f"`{selected_agent.path_agent_workspace}`")
-
-                if st.button("Reset Agent", use_container_width=True):
-                    del st.session_state.selected_agent
-                    st.rerun()
-
-            command: AgentCommand = selected_agent.ui_define_command()
-            with execute_button[0]:
-                st.button(
-                    "Execute Command",
-                    use_container_width=True,
-                    type="primary",
-                    on_click=lambda: selected_agent.run(command=command),
-                )
-
+def chat_interface() -> None:
+    """Streamlit chat interface for code agents."""
     with st._bottom:
         task: Optional[str] = st.chat_input("Assign a task to the agent...")
 
@@ -653,6 +648,9 @@ def main() -> None:
             st.markdown(task)
 
         with st.chat_message("assistant"):
+            selected_agent: CodeAgent[Any] = st.session_state.selected_agent
+            command: AgentCommand = selected_agent.ui_define_command()
+
             selected_agent.run(task=task, command=command)
             diff: str = selected_agent.get_diff()
             if diff:
@@ -663,4 +661,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    st.set_page_config(page_title="Agents-in-a-Box", layout="wide")
+    agent_controls()
+    chat_interface()  
