@@ -160,7 +160,7 @@ class DockerSandbox:
             f"tcpdump -l -A -i eth0 > /workspace/network_traffic.log 2>&1 & sleep 1; {agent_cmd}",
         ]
 
-        self.logger.info(f"Executing command: {' '.join(cmd)}")
+        self.logger.info(f"Executing command: {agent_cmd.split(' ')}")
 
         try:
             subprocess.run(cmd, check=True)
