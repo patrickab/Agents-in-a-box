@@ -116,7 +116,7 @@ class AgentCommand(BaseModel, ABC):
                 key=key_for(name),
             )
 
-        def ui_for_list(name: str, description: str, default: Any, t: Union[type, object]) -> List[Any]:
+        def ui_for_list(name: str, description: str, default: Any, t: Union[type, object]) -> List[Any]: # noqa
             inner = inner_type(t)
             if is_literal(inner):
                 options = literal_choices(inner)
@@ -135,7 +135,7 @@ class AgentCommand(BaseModel, ABC):
             )
             return [item.strip() for item in text_input.split(",") if item.strip()]
 
-        def ui_for_number(name: str, description: str, default: Any, t: Union[type, object]) -> Union[int, float]:
+        def ui_for_number(name: str, description: str, default: Any, t: Union[type, object]) -> Union[int, float]: # noqa
             is_int = t is int
             value = default if default is not None else (0 if is_int else 0.0)
             step = 1 if is_int else 0.1
@@ -146,7 +146,7 @@ class AgentCommand(BaseModel, ABC):
                 step=step,
             )
 
-        def ui_for_text(name: str, description: str, default: Any) -> str:
+        def ui_for_text(name: str, description: str, default: Any) -> str: # noqa
             return st.text_input(
                 description,
                 value=default if default is not None else "",
