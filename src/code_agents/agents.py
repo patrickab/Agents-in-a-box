@@ -3,6 +3,9 @@ from typing import Any, ClassVar, List, Literal, Optional
 import logging
 import subprocess
 import git
+import os
+from pathlib import Path
+import shutil
 from pydantic import Field
 import streamlit as st
 
@@ -273,6 +276,50 @@ def create_remote_branch(repo_url: str, branch_name: str) -> bool:
         return False
 
 
+def get_changed_files(workspace: Path) -> list[Path]:
+    """Return list of paths (absolute) for files changed vs HEAD."""
+    result = subprocess.run(
+        ["git", "-C", str(workspace), "diff", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return [workspace / f for f in files]
+
+
+def copy_changed_files_to_home(workspace: Path, repo_url: str) -> tuple[int, Path]:
+    """
+    Copy all changed files from the agent workspace to a mirror repo under the user's home.
+
+    Source:  ~/agent_sandbox/<repo_name>/
+    Target:  ~/<repo_name>/
+
+    Returns (count_copied, target_root).
+    """
+    home = Path.home()
+    repo_name = repo_url.rstrip("/").split("/")[-1]
+    if repo_name.endswith(".git"):
+        repo_name = repo_name[:-4]
+
+    target_root = home / repo_name
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    changed_files = get_changed_files(workspace)
+    copied = 0
+
+    for src in changed_files:
+        if not src.is_file():
+            continue
+        rel = src.relative_to(workspace)
+        dst = target_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied += 1
+
+    return copied, target_root
+
+
 def agent_controls() -> None:
     """Streamlit entrypoint for multi-agent code workspace."""
 
@@ -373,9 +420,23 @@ def agent_controls() -> None:
                 st.markdown(f"{selected_agent.__class__.__name__}")
                 st.markdown(f"[{repo_slug}]({repo_url}) / [{branch}]({branch_url})")
                 st.markdown(f"`{selected_agent.path_agent_workspace}`")
-            if st.button("Reset Agent", use_container_width=True):
-                del st.session_state.selected_agent
-                st.rerun()
+
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                if st.button("Reset Agent", use_container_width=True):
+                    del st.session_state.selected_agent
+                    st.rerun()
+            with btn_col2:
+                if st.button("Sync Changes to Home", use_container_width=True):
+                    with st.spinner("Copying changed files to home repository..."):
+                        count, target_root = copy_changed_files_to_home(
+                            workspace=selected_agent.path_agent_workspace,
+                            repo_url=repo_url,
+                        )
+                    if count > 0:
+                        st.success(f"Copied {count} file(s) to `{target_root}`.")
+                    else:
+                        st.info("No changed files to sync.")
 
         command: AgentCommand = selected_agent.ui_define_command()
         with execute_button[0]:
