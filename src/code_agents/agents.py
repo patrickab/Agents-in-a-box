@@ -1,5 +1,7 @@
 from typing import Any, ClassVar, List, Literal, Optional
 
+import logging
+import subprocess
 import git
 from pydantic import Field
 import streamlit as st
@@ -18,6 +20,8 @@ from code_agents.config import (
     MODELS_OPENAI,
     MODELS_VLLM,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_ARGS_AIDER = ["--dark-mode", "--code-theme", "inkpot", "--pretty"]
 
@@ -197,8 +201,76 @@ def get_agent(agent_type: str, repo_url: str, branch: str) -> CodeAgent[Any]:
 
 def get_remote_branches(repo_url: str) -> list[str]:
     """Extract branch names from remote repository."""
-    lines = git.Git().ls_remote("--heads", repo_url).splitlines()
-    return [ref.split("\t", 1)[1].replace("refs/heads/", "") for ref in lines]
+    try:
+        lines = git.Git().ls_remote("--heads", repo_url).splitlines()
+        return [
+            ref.split("\t", 1)[1].replace("refs/heads/", "")
+            for ref in lines
+            if "\t" in ref
+        ]
+    except git.GitCommandError as e:
+        logger.error("Failed to fetch remote branches for %s: %s", repo_url, e)
+        return []
+    except Exception:
+        logger.exception("Unexpected error while fetching remote branches for %s", repo_url)
+        return []
+
+
+def create_remote_branch(repo_url: str, branch_name: str) -> bool:
+    """
+    Create a new branch on the remote by:
+    - cloning the repo into a temporary directory,
+    - creating the branch from the default branch,
+    - pushing the new branch.
+    Returns True on success, False on failure.
+    """
+    import tempfile
+    from pathlib import Path
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            # Clone bare minimum
+            subprocess.run(
+                ["git", "clone", "--origin", "origin", repo_url, str(tmp_path)],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            # Determine default branch
+            result = subprocess.run(
+                ["git", "-C", str(tmp_path), "symbolic-ref", "refs/remotes/origin/HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            default_ref = result.stdout.strip()
+            default_branch = default_ref.split("/")[-1]
+
+            # Create new branch from default branch
+            subprocess.run(
+                ["git", "-C", str(tmp_path), "checkout", "-b", branch_name, f"origin/{default_branch}"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            # Push new branch
+            subprocess.run(
+                ["git", "-C", str(tmp_path), "push", "origin", branch_name],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error("Failed to create remote branch %s on %s: %s", branch_name, repo_url, e)
+        return False
+    except Exception:
+        logger.exception("Unexpected error while creating remote branch %s on %s", branch_name, repo_url)
+        return False
 
 
 def agent_controls() -> None:
@@ -208,16 +280,78 @@ def agent_controls() -> None:
         st.markdown("## Agent Controls")
         selected_agent_name: str = st.selectbox("Select Code Agent", options=agent_subclass_names, key="code_agent_selector")
         repo_url = st.text_input("GitHub Repository URL", key="repo_url")
+        branch: Optional[str] = None
+
         if repo_url:
             if "branches" not in st.session_state or st.session_state.cached_repo_url != repo_url:
                 with st.spinner("Fetching branches..."):
                     st.session_state.branches = get_remote_branches(repo_url)
                 st.session_state.cached_repo_url = repo_url
-            branch = st.selectbox("Select Branch", options=st.session_state.branches, index=0, key="branch_selector")
+
+            branches = st.session_state.branches
+
+            # If fetching branches failed, show error and stop
+            if not branches:
+                st.error(
+                    "Unable to fetch branches for this repository. "
+                    "Please check that the URL is correct and accessible."
+                )
+                return
+
+            is_ssh = repo_url.startswith("git@")
+
+            if is_ssh:
+                # Allow free-text input for branch name
+                branch_input = st.text_input(
+                    "Branch (select existing or type a new branch name)",
+                    value=branches[0] if branches else "",
+                    key="branch_text_input",
+                )
+                # Provide a dropdown of existing branches for convenience
+                selected_existing = st.selectbox(
+                    "Existing branches",
+                    options=branches,
+                    index=0,
+                    key="branch_selector",
+                )
+
+                # If user leaves the text input empty, use the selected existing branch
+                if branch_input.strip() == "":
+                    branch = selected_existing
+                elif branch_input.strip() in branches:
+                    branch = branch_input.strip()
+                else:
+                    # New branch name entered: create it on the remote
+                    new_branch = branch_input.strip()
+                    if st.button(f"Create and use new branch '{new_branch}'", key="create_branch_button"):
+                        with st.spinner(f"Creating branch '{new_branch}' on remote..."):
+                            success = create_remote_branch(repo_url, new_branch)
+                        if success:
+                            st.success(f"Branch '{new_branch}' created.")
+                            # Refresh branches and set current branch
+                            with st.spinner("Refreshing branches..."):
+                                st.session_state.branches = get_remote_branches(repo_url)
+                            branches = st.session_state.branches
+                            if new_branch not in branches:
+                                branches.append(new_branch)
+                            branch = new_branch
+                        else:
+                            st.error(f"Failed to create branch '{new_branch}'. Please check your SSH access.")
+                            branch = None
+                    else:
+                        branch = None
+            else:
+                # Non-SSH: only allow selecting existing branches
+                branch = st.selectbox(
+                    "Select Branch",
+                    options=branches,
+                    index=0,
+                    key="branch_selector",
+                )
 
         def init_agent() -> None:
             """Initialize and store agent in session state."""
-            selected_agent: CodeAgent[Any] = get_agent(agent_type=selected_agent_name, repo_url=repo_url, branch=branch)
+            selected_agent: CodeAgent[Any] = get_agent(agent_type=selected_agent_name, repo_url=repo_url, branch=branch)  # type: ignore[arg-type]
             st.session_state.selected_agent = selected_agent
 
         if repo_url and branch:
