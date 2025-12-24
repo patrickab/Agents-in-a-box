@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar, Union, get_args, get_origin
 
+from git import Repo
 from llm_baseclient.config import OLLAMA_PORT
 from pydantic import BaseModel, Field
 import streamlit as st
@@ -116,7 +117,7 @@ class AgentCommand(BaseModel, ABC):
                 key=key_for(name),
             )
 
-        def ui_for_list(name: str, description: str, default: Any, t: Union[type, object]) -> List[Any]: # noqa
+        def ui_for_list(name: str, description: str, default: Any, t: Union[type, object]) -> List[Any]:  # noqa
             inner = inner_type(t)
             if is_literal(inner):
                 options = literal_choices(inner)
@@ -135,7 +136,7 @@ class AgentCommand(BaseModel, ABC):
             )
             return [item.strip() for item in text_input.split(",") if item.strip()]
 
-        def ui_for_number(name: str, description: str, default: Any, t: Union[type, object]) -> Union[int, float]: # noqa
+        def ui_for_number(name: str, description: str, default: Any, t: Union[type, object]) -> Union[int, float]:  # noqa
             is_int = t is int
             value = default if default is not None else (0 if is_int else 0.0)
             step = 1 if is_int else 0.1
@@ -146,7 +147,7 @@ class AgentCommand(BaseModel, ABC):
                 step=step,
             )
 
-        def ui_for_text(name: str, description: str, default: Any) -> str: # noqa
+        def ui_for_text(name: str, description: str, default: Any) -> str:  # noqa
             return st.text_input(
                 description,
                 value=default if default is not None else "",
@@ -247,61 +248,29 @@ class CodeAgent(ABC, Generic[TCommand]):
 
         workspace: Path = sandbox_root / repo_name
 
-        if workspace.exists() and (workspace / ".git").exists():
-            subprocess.run(
-                ["git", "-C", str(workspace), "pull"],
-                check=False,
-            )
-        else:
-            subprocess.run(
-                ["git", "clone", repo_url, str(workspace)],
-                check=False,
-            )
-
-        # Ensure we have up-to-date remote refs
-        subprocess.run(
-            ["git", "-C", str(workspace), "fetch", "origin"],
-            check=False,
-        )
-
-        # Try to checkout the requested branch; if it doesn't exist, create it from default branch
-        checkout_result = subprocess.run(
-            ["git", "-C", str(workspace), "checkout", branch],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        if checkout_result.returncode != 0:
-            # Branch does not exist locally; try to create it from the remote default branch
-            # Determine default branch from origin/HEAD
-            default_ref_result = subprocess.run(
-                ["git", "-C", str(workspace), "symbolic-ref", "refs/remotes/origin/HEAD"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if default_ref_result.returncode == 0:
-                default_ref = default_ref_result.stdout.strip()
-                default_branch = default_ref.split("/")[-1]
+        try:
+            if workspace.exists() and (workspace / ".git").exists():
+                repo = Repo(workspace)
+                repo.remotes.origin.pull()
             else:
-                # Fallback: assume 'main' if we cannot detect default
-                default_branch = "main"
+                repo = Repo.clone_from(repo_url, workspace)
 
-            # Create new branch from origin/<default_branch>
-            create_result = subprocess.run(
-                ["git", "-C", str(workspace), "checkout", "-b", branch, f"origin/{default_branch}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            # Attempt to checkout the branch; create it from origin/HEAD if it doesn't exist
+            try:
+                repo.git.checkout(branch)
+            except Exception:
+                # Try to determine the default branch from remote HEAD
+                try:
+                    default_ref = repo.remotes.origin.refs["HEAD"].reference
+                    default_branch = default_ref.name.split("/")[-1]
+                except Exception:
+                    default_branch = "main"
+                # Create and checkout new branch from the default branch
+                repo.git.checkout("-b", branch, f"origin/{default_branch}")
 
-            if create_result.returncode != 0:
-                # As a last resort, try creating from local default_branch (if exists)
-                subprocess.run(
-                    ["git", "-C", str(workspace), "checkout", "-b", branch, default_branch],
-                    check=False,
-                )
+        except Exception as e:
+            st.error(f"Git operation failed: {e}")
+            raise
 
         self._try_install_dependencies(workspace)
         return workspace
