@@ -2,13 +2,14 @@ from abc import ABC
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar, Union, get_args, get_origin
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar, get_args, get_origin
 
 from git import Repo
 from llm_baseclient.config import OLLAMA_PORT
 from pydantic import BaseModel, Field
 import streamlit as st
 
+from code_agents.config import PATH_SANDBOX
 from code_agents.sandbox import DockerSandbox
 
 GIT_NAME = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True).stdout.strip()
@@ -78,109 +79,50 @@ class AgentCommand(BaseModel, ABC):
     def ui_define_fields(cls) -> Dict[str, Any]:
         """Generate UI elements for all pydantic fields and return their values."""
         values: Dict[str, Any] = {}
-        model_fields = cls.model_fields
         base_excluded = {"executable", "workspace", "args", "env_vars", "task_injection_template"}
-        base_key_prefix = cls.__name__.lower()
 
-        def key_for(field_name: str) -> str:
-            return f"{base_key_prefix}_{field_name}"
-
-        def is_literal(t: Union[type, object]) -> bool:
-            return get_origin(t) is Literal
-
-        def literal_choices(t: Union[type, object]) -> List[Any]:
-            return list(get_args(t))
-
-        def is_list(t: Union[type, object]) -> bool:
-            return get_origin(t) in (list, List)
-
-        def inner_type(t: Union[type, object]) -> Union[type, object]:
-            args = get_args(t)
-            return args[0] if args else type(None)
-
-        def ui_for_bool(name: str, description: str, default: Optional[bool]) -> bool:
-            return st.checkbox(
-                description,
-                value=default if default is not None else False,
-                key=key_for(name),
-            )
-
-        def ui_for_literal(name: str, description: str, default: Any, t: Union[type, object]) -> Any:  # noqa
-            options = literal_choices(t)
-            index = 0
-            if default is not None and default in options:
-                index = options.index(default)
-            return st.selectbox(
-                description,
-                options=options,
-                index=index,
-                key=key_for(name),
-            )
-
-        def ui_for_list(name: str, description: str, default: Any, t: Union[type, object]) -> List[Any]:  # noqa
-            inner = inner_type(t)
-            if is_literal(inner):
-                options = literal_choices(inner)
-                default_list = default if isinstance(default, list) else []
-                return st.multiselect(
-                    description,
-                    options=options,
-                    default=default_list,
-                    key=key_for(name),
-                )
-            text_default = ", ".join(default) if isinstance(default, list) else ""
-            text_input = st.text_input(
-                description,
-                value=text_default,
-                key=key_for(name),
-            )
-            return [item.strip() for item in text_input.split(",") if item.strip()]
-
-        def ui_for_number(name: str, description: str, default: Any, t: Union[type, object]) -> Union[int, float]:  # noqa
-            is_int = t is int
-            value = default if default is not None else (0 if is_int else 0.0)
-            step = 1 if is_int else 0.1
-            return st.number_input(
-                description,
-                value=value,
-                key=key_for(name),
-                step=step,
-            )
-
-        def ui_for_text(name: str, description: str, default: Any) -> str:  # noqa
-            return st.text_input(
-                description,
-                value=default if default is not None else "",
-                key=key_for(name),
-            )
-
-        for field_name, field_info in model_fields.items():
-            if field_name in base_excluded:
+        for name, field in cls.model_fields.items():
+            if name in base_excluded:
                 continue
 
-            field_type = field_info.annotation
-            field_description = field_info.description or field_name
-            field_default = field_info.default if field_info.default != ... else None
+            key = f"{cls.__name__.lower()}_{name}"
+            desc = field.description or name
+            default = field.default if field.default != ... else None
 
-            if field_type is bool:
-                values[field_name] = ui_for_bool(field_name, field_description, field_default)
-                continue
-
-            if is_literal(field_type):
-                values[field_name] = ui_for_literal(field_name, field_description, field_default, field_type)
-                continue
-
-            if is_list(field_type):
-                values[field_name] = ui_for_list(field_name, field_description, field_default, field_type)
-                continue
-
-            if field_type in (int, float):
-                values[field_name] = ui_for_number(field_name, field_description, field_default, field_type)
-                continue
-
-            values[field_name] = ui_for_text(field_name, field_description, field_default)
+            values[name] = cls._render_ui_field(desc, default, field.annotation, key)
 
         return values
+
+    @staticmethod
+    def _render_ui_field(desc: str, default: Any, t: Any, key: str) -> Any:  # noqa
+        origin = get_origin(t)
+        args = get_args(t)
+
+        if t is bool:
+            return st.checkbox(desc, value=default or False, key=key)
+
+        if origin is Literal:
+            options = list(args)
+            idx = options.index(default) if default in options else 0
+            return st.selectbox(desc, options=options, index=idx, key=key)
+
+        if origin in (list, List):
+            inner = args[0] if args else type(None)
+            if get_origin(inner) is Literal:
+                options = list(get_args(inner))
+                return st.multiselect(desc, options=options, default=default or [], key=key)
+
+            text_val = ", ".join(default) if isinstance(default, list) else ""
+            res = st.text_input(desc, value=text_val, key=key)
+            return [x.strip() for x in res.split(",") if x.strip()]
+
+        if t in (int, float):
+            is_int = t is int
+            val = default if default is not None else (0 if is_int else 0.0)
+            step = 1 if is_int else 0.1
+            return st.number_input(desc, value=val, step=step, key=key)
+
+        return st.text_input(desc, value=default or "", key=key)
 
 
 TCommand = TypeVar("TCommand", bound=AgentCommand)
