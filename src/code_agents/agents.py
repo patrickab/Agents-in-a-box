@@ -277,32 +277,17 @@ def commit_to_home(workspace: Path, repo_url: str, message: str) -> tuple[bool, 
         return False, "No changed files to sync; nothing to commit."
 
     try:
-        # Stage all changes
-        add_result = subprocess.run(
-            ["git", "-C", str(target_root), "add", "."],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if add_result.returncode != 0:
-            return False, f"git add failed:\n{add_result.stderr}"
-
-        # Commit
-        commit_result = subprocess.run(
-            ["git", "-C", str(target_root), "commit", "-m", message],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if commit_result.returncode != 0:
-            # If nothing to commit, treat as non-fatal
-            if "nothing to commit" in commit_result.stderr.lower():
+        repo = git.Repo(target_root)
+        repo.git.add(".")
+        try:
+            commit_result = repo.index.commit(message)
+            return True, f"Committed changes in `{target_root}`. Commit: {commit_result.hexsha}"
+        except git.exc.GitError as e:
+            if "nothing to commit" in str(e).lower():
                 return False, "Nothing to commit in home repository."
-            return False, f"git commit failed:\n{commit_result.stderr}"
-
-        return True, f"Committed changes in `{target_root}`."
-    except Exception as exc:
-        return False, f"Commit failed: {exc}"
+            return False, f"git commit failed: {e}"
+    except Exception as e:
+        return False, f"Commit failed: {e}"
 
 
 def agent_controls() -> None:
