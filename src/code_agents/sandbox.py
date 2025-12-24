@@ -101,7 +101,7 @@ class DockerSandbox:
             try:
                 subprocess.run(["ip", "addr", "show", "to", SECURE_LOOPBACK_IP], check=True, capture_output=True)
             except subprocess.CalledProcessError:
-                self.logger.warning(
+                raise SecurityEnvironmentError(
                     f"Secure Bridge IP {SECURE_LOOPBACK_IP} is missing. For Ollama Run: sudo ip addr add 10.200.200.1/32 dev lo"
                 )
 
