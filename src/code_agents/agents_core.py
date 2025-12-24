@@ -104,7 +104,7 @@ class AgentCommand(BaseModel, ABC):
                 key=key_for(name),
             )
 
-        def ui_for_literal(name: str, description: str, default: Any, t: Union[type, object]) -> Any:  # noqa: ANN401
+        def ui_for_literal(name: str, description: str, default: Any, t: Union[type, object]) -> Any:  # noqa
             options = literal_choices(t)
             index = 0
             if default is not None and default in options:

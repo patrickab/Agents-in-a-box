@@ -2,45 +2,51 @@
 Security Architecture - Defense in Depth
 
 1. Zero-Trust Execution Policy
-
-    - "Assume Breach Principle":
-        All code is treated potentially malicious.
+    - Assume Breach Principle:
+        All agent code treated as potentially malicious.
 
 2. Kernel-Level Isolation (gVisor)
-
     - Sandboxed System Calls:
-        Uses the 'runsc' runtime to provide a dedicated
-        guest kernel for the container.
-    - Host Protection:
-        Acts as a "firewall" between the container and the host
+        'runsc' runtime provides dedicated guest kernel for container.
+        Acts as syscall firewall between container and host.
 
 3. Hardened User Identity & Capability Stripping
+    - Container Root with Namespace Isolation:
+        Container runs as UID 0 for workspace file modification.
+        Rootless Docker maps container root → unprivileged host user (100000+).
+        Agent can modify workspace without permission conflicts.
 
-    - Globally remove Linux kernel capabilities (--cap-drop=ALL):
-        Container cannot perform system-level tasks.
-    - Enforce 'no-new-privileges':
-        Prevent privilege escalation attacks
-    - Non-Root Enforcement:
-        Containers are forced to run as an unprivileged user
-        (UID 1000), removing administrative power by default.
+    - Complete Capability Dropping (--cap-drop=ALL):
+        Container stripped of all Linux kernel capabilities by default.
+
+    - Privilege Escalation Prevention (--security-opt no-new-privileges):
+        Blocks runtime privilege escalation attacks.
 
 4. Rootless Infrastructure Architecture
-
     - Unprivileged Daemon:
-        - Docker Engine runs without root privileges on the host
+        Docker Engine runs without root privileges on host.
     - Identity Mapping:
-        - Rootless Docker maps container root users to non-root host users,
+        Container UID 0 → Host UID 100000+ (unprivileged range).
+        Container breakout lands as unprivileged host user.
 
-5. Ephemeral Lifecycle Management
+5. Resource Isolation & DoS Prevention
+    - Memory Limits:
+        Prevents memory exhaustion attacks (default: 4GB).
+    - CPU Limits:
+        Throttles CPU usage to prevent resource starvation (default: 2 cores).
+    - Process Limits:
+        Blocks fork bombs (default: 100 PIDs max).
+
+6. Ephemeral Lifecycle Management
     - Destruction on Completion:
-        Containers are strictly temporary
-        Automatically destroyed after task execution.
+        Containers automatically removed after task execution (--rm).
+        No persistent container state or residual data.
 
-6. Network Perimeter Control
+7. Network Perimeter Control
     - Traffic Segregation:
-        Places containers on isolated bridge networks to monitor and restrict data flow.
-    - Exfiltration Prevention:
-        Limits the container's ability to communicate with the internal network or move laterally to other services.
+        Isolated bridge network restricts lateral movement.
+    - Host Communication:
+        Secure loopback alias (10.200.200.1) for controlled host access.
 """
 
 import os
@@ -78,8 +84,7 @@ class DockerSandbox:
     (2) Host-to-Container synchronization via Bind Mounts.
     (3) Syscall isolation using gVisor (runsc).
     (4) Ephemeral lifecycle (auto-removal).
-    (5) Least Privilege: Enforces non-root UID and drops capabilities.
-    (6) Daemon Isolation: Validates Rootless Docker.
+    (5) Least Privilege: Drops all capabilities for root - root privileges needed to edit mounted hostfiles.
     """
 
     def __init__(self, dockerimage_name: str) -> None:
@@ -129,24 +134,22 @@ class DockerSandbox:
             "docker",
             "run",
             "-it",
-            "--rm",
+            "--rm",  # run interactive & remove after exit
             "--runtime=runsc",
             "--user",
             "0:0",  # Internal Root -> Host User 1000 (Rootless)
+            # Network
             "--network",
             "bridge",
             f"--add-host=host.docker.internal:{SECURE_LOOPBACK_IP}",
             "--dns",
             "8.8.8.8",
-            # --- SECURITY/CAPABILITY ADJUSTMENTS ---
-            # Drop everything first for security...
+            # Security: Drop everything
             "--cap-drop=ALL",
-            # ...but add back ONLY what tcpdump needs to sniff traffic
-            "--cap-add=NET_ADMIN",
-            "--cap-add=NET_RAW",
+            # "--cap-add=NET_RAW", needed in future for network sniffing (whitelist/blacklist websites)
             "--security-opt",
             "no-new-privileges",
-            # --- MOUNTS ---
+            # Mounts
             "-v",
             f"{abs_repo_path}:/workspace:z",
             "-w",
