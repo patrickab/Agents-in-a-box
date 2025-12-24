@@ -105,6 +105,9 @@ class Aider(CodeAgent[AiderCommand]):
                 default=[common_flags[0], common_flags[1]],
                 accept_new_options=True,
             )
+            if "ollama/" in model_architect or "ollama/" in model_editor:
+                flags.append("--no-stream") # Ollama's streaming is buggy
+
             cmd = AiderCommand(
                 workspace=self.path_agent_workspace,
                 args=flags + DEFAULT_ARGS_AIDER,
