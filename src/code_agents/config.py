@@ -1,6 +1,9 @@
 import os
 import subprocess
 
+# =================== General Config ====================
+PATH_SANDBOX = os.path.expanduser("~/agent_sandbox")
+
 # ===================== Docker Config =====================
 PROJECT_ROOT = os.path.abspath(".")
 DOCKERFILES_PATH = os.path.join(PROJECT_ROOT, "src", "code_agent", "dockerfiles")

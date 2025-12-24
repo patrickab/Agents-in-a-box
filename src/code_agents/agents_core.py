@@ -181,14 +181,14 @@ class CodeAgent(ABC, Generic[TCommand]):
             - creates ~/agent_sandbox/<repo_name>
             - runs optional dependency installation
         """
-        sandbox_root: Path = Path.home() / "agent_sandbox"
-        sandbox_root.mkdir(parents=True, exist_ok=True)
+        path_sandbox = Path(PATH_SANDBOX)
+        path_sandbox.mkdir(parents=True, exist_ok=True)
 
         repo_name: str = repo_url.rstrip("/").split("/")[-1]
         if repo_name.endswith(".git"):
             repo_name = repo_name[:-4]
 
-        workspace: Path = sandbox_root / repo_name
+        workspace: Path = path_sandbox / repo_name
 
         try:
             if workspace.exists() and (workspace / ".git").exists():
@@ -246,7 +246,6 @@ class CodeAgent(ABC, Generic[TCommand]):
                 check=False,
             )
         except OSError:
-            # ignore installation failures; agent expected to handle env issues
             return
 
     def _execute_agent_command(self, command: TCommand) -> None:
