@@ -1,3 +1,4 @@
+import contextlib
 import logging
 from pathlib import Path
 import shutil
@@ -279,6 +280,11 @@ def commit_to_home(workspace: Path, repo_url: str, message: str) -> tuple[bool, 
     try:
         repo = git.Repo(target_root)
         repo.git.add(".")
+
+        # Remove .aider* files from staging if any were added
+        with contextlib.suppress(git.exc.GitCommandError):
+            repo.git.execute(["git", "rm", "--cached", ".aider*", "--ignore-unmatch"])
+
         try:
             commit_result = repo.index.commit(message)
             return True, f"Committed changes in `{target_root}`. Commit: {commit_result.hexsha}"
