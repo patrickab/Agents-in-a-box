@@ -106,7 +106,7 @@ class Aider(CodeAgent[AiderCommand]):
                 accept_new_options=True,
             )
             if "ollama/" in model_architect or "ollama/" in model_editor:
-                flags.append("--no-stream") # Ollama's streaming is buggy
+                flags.append("--no-stream")  # Ollama's streaming is buggy
 
             cmd = AiderCommand(
                 workspace=self.path_agent_workspace,
@@ -344,7 +344,6 @@ def agent_controls() -> None:
             st.button("Initialize Agent", key="init_agent_button", on_click=init_agent)
 
     else:
-
         selected_agent: CodeAgent[Any] = st.session_state.selected_agent
         repo_url = selected_agent.repo_url
         branch = selected_agent.branch
@@ -359,10 +358,7 @@ def agent_controls() -> None:
                 st.markdown(f"{selected_agent.__class__.__name__}")
                 display_repo = repo_url.replace("git@github.com:", "github.com/").removesuffix(".git")
                 display_repo = display_repo.replace("https://", "")
-                st.markdown(
-                    f"[{display_repo}](https://{display_repo})"
-                    f" / [{branch}](https://{display_repo}/tree/{branch})\n"
-                )
+                st.markdown(f"[{display_repo}](https://{display_repo}) / [{branch}](https://{display_repo}/tree/{branch})\n")
                 st.markdown(f"`{selected_agent.path_agent_workspace}`")
 
         st.markdown("---")
