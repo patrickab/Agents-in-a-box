@@ -1,12 +1,14 @@
 from abc import ABC
+import contextlib
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar, get_args, get_origin
+from typing import Any, Dict, Generic, List, Literal, Optional, Type, TypeVar, get_args, get_origin
 
-from git import Repo
+from git import GitCommandError, Repo
 from llm_baseclient.config import OLLAMA_PORT
 from pydantic import BaseModel, Field
+from pydantic_core import PydanticUndefined
 import streamlit as st
 
 from code_agents.config import PATH_SANDBOX
@@ -14,16 +16,15 @@ from code_agents.sandbox import DockerSandbox
 
 GIT_NAME = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True).stdout.strip()
 GIT_EMAIL = subprocess.run(["git", "config", "--global", "user.email"], capture_output=True, text=True).stdout.strip()
-
 ENV_VARS = {
     "OLLAMA_API_BASE": f"http://host.docker.internal:{OLLAMA_PORT}",
+    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY", ""),
+    "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
+    "OLLAMA_API_KEY": os.getenv("OLLAMA_API_KEY", ""),
     "GIT_AUTHOR_NAME": GIT_NAME,
     "GIT_COMMITTER_NAME": GIT_NAME,
     "GIT_AUTHOR_EMAIL": GIT_EMAIL,
     "GIT_COMMITTER_EMAIL": GIT_EMAIL,
-    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY", ""),
-    "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
-    "OLLAMA_API_KEY": os.getenv("OLLAMA_API_KEY", ""),
 }
 
 
@@ -124,7 +125,6 @@ class AgentCommand(BaseModel, ABC):
 
         return st.text_input(desc, value=default or "", key=key)
 
-
 TCommand = TypeVar("TCommand", bound=AgentCommand)
 
 
@@ -157,182 +157,115 @@ class CodeAgent(ABC, Generic[TCommand]):
     DOCKERTAG: str
 
     def __init__(self, repo_url: str, branch: str) -> None:
-        self.repo_url: str = repo_url
-        self.branch: str = branch
-        self.path_agent_workspace: Path = self._setup_workspace(repo_url, branch)
+        self.repo_url = repo_url
+        self.branch = branch
+        self.path_agent_workspace = self._initialize_workspace()
 
-    def _setup_workspace(self, repo_url: str, branch: str) -> Path:
-        """Setup agent workspace: clone, checkout branch, install deps.
+    def _initialize_workspace(self) -> Path:
+        """Setup agent workspace: clone, checkout, install deps."""
+        repo_name = self.repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+        workspace = Path(PATH_SANDBOX) / repo_name
+        workspace.parent.mkdir(parents=True, exist_ok=True)
 
-        Input:
-            repo_url: str
-               - HTTPS or SSH git URL
-               - parseable by gitpython
-            branch: str
-               - target branch name
-               - used for checkout or creation
+        self._git_checkout(workspace)
+        self._install_dependencies(workspace)
+        return workspace
 
-        Output:
-            workspace_path: Path
-               - absolute path to repo root
-               - guaranteed to exist on success
-
-        Side Effects:
-            - creates ~/agent_sandbox/<repo_name>
-            - runs optional dependency installation
-        """
-        path_sandbox = Path(PATH_SANDBOX)
-        path_sandbox.mkdir(parents=True, exist_ok=True)
-
-        repo_name: str = repo_url.rstrip("/").split("/")[-1]
-        if repo_name.endswith(".git"):
-            repo_name = repo_name[:-4]
-
-        workspace: Path = path_sandbox / repo_name
-
+    def _git_checkout(self, workspace: Path) -> None:
+        """Setup agent workspace: clone, checkout branch, install deps."""
         try:
-            if workspace.exists() and (workspace / ".git").exists():
+            # hard reset if changes exist            
+            if (workspace / ".git").exists():
                 repo = Repo(workspace)
+                repo.git.reset("--hard")
                 repo.remotes.origin.pull()
             else:
-                repo = Repo.clone_from(repo_url, workspace)
+                repo = Repo.clone_from(self.repo_url, workspace)
 
-            # Attempt to checkout the branch; create it from origin/HEAD if it doesn't exist
-            try:
-                repo.git.checkout(branch)
-            except Exception:
-                # Try to determine the default branch from remote HEAD
+            # Checkout logic
+            if self.branch in repo.heads:
+                repo.heads[self.branch].checkout()
+            else:
+                # Determine default branch safely
                 try:
-                    default_ref = repo.remotes.origin.refs["HEAD"].reference
-                    default_branch = default_ref.name.split("/")[-1]
-                except Exception:
+                    head_ref = repo.remotes.origin.refs["HEAD"].reference.name
+                    default_branch = head_ref.split("/")[-1]
+                except (IndexError, AttributeError, ValueError):
                     default_branch = "main"
-                # Create and checkout new branch from the default branch
-                repo.git.checkout("-b", branch, f"origin/{default_branch}")
 
-        except Exception as e:
+                repo.git.checkout("-b", self.branch, f"origin/{default_branch}")
+
+        except (GitCommandError, Exception) as e:
             st.error(f"Git operation failed: {e}")
             raise
 
-        self._try_install_dependencies(workspace)
-        return workspace
+    def _install_dependencies(self, workspace: Path) -> None:
+        """Best-effort dependency installation using uv."""
+        cmd = None
+        if (workspace / "requirements.txt").exists():
+            cmd = ["uv", "pip", "install", "-r", "requirements.txt"]
+        elif (workspace / "pyproject.toml").exists():
+            cmd = ["uv", "pip", "install", "-e", "."]
 
-    def _try_install_dependencies(self, workspace: Path) -> None:
-        """
-        Best-effort dependency installation; non-fatal on failure.
-        Assumes `uv` installed on system PATH.
+        if cmd:
+            with contextlib.suppress(FileNotFoundError):
+                subprocess.run(cmd, cwd=workspace, check=False, capture_output=True)
 
-        Input:
-            workspace: Path
-               - repository root path
-               - must exist
-        """
-        requirements: Path = workspace / "requirements.txt"
-        pyproject: Path = workspace / "pyproject.toml"
+    def get_command_class(self) -> Type[TCommand]:
+        """Resolve the command class from generics."""
+        for cls in self.__class__.__mro__:
+            for base in getattr(cls, "__orig_bases__", []):
+                if get_origin(base) is CodeAgent:
+                    args = get_args(base)
+                    if args and issubclass(args[0], AgentCommand):
+                        return args[0]
+        raise NotImplementedError(f"Could not determine command class for {self.__class__.__name__}")
 
-        cmd: Optional[List[str]] = None
-        if requirements.is_file():
-            cmd = ["uv", "pip", "install", "-r", str(requirements)]
-        elif pyproject.is_file():
-            cmd = ["uv", "pip", "install", "-e", str(workspace)]
+    def run(self, command: TCommand, task: Optional[str] = None) -> None:
+        """Execute the agent command."""
+        if task and command.task_injection_template:
+            injected_task = [token.format(task=task) for token in command.task_injection_template]
+            command.args.extend(injected_task)
 
-        if not cmd:
-            return
+        cmd_str = subprocess.list2cmdline([command.executable, *command.construct_args()])
 
+        sandbox = DockerSandbox(dockerimage_name=f"{self.DOCKERTAG}:latest")
         try:
-            subprocess.run(
-                cmd,
-                cwd=workspace,
-                check=False,
-            )
-        except OSError:
-            return
-
-    def _execute_agent_command(self, command: TCommand) -> None:
-        """Execute the agent command in its workspace using DockerSandbox.
-
-        Input:
-            command: TCommand
-               - fully configured agent command
-
-        Side Effects:
-            - runs agent inside secure Docker sandbox
-        """
-        agent_shell_cmd = subprocess.list2cmdline([command.executable, *command.construct_args()])
-
-        sandbox = DockerSandbox(dockerimage_name=f"{self.__class__.DOCKERTAG}:latest")
-        try:
-            sandbox.run_interactive_shell(
-                repo_path=str(self.path_agent_workspace), agent_cmd=agent_shell_cmd, env_vars=command.env_vars
-            )
+            sandbox.run_interactive_shell(repo_path=str(self.path_agent_workspace), agent_cmd=cmd_str, env_vars=command.env_vars)
         except Exception as exc:
             st.error(f"Failed to run agent in sandbox: {exc}")
             raise
 
-    def run(self, command: TCommand, task: Optional[str] = None) -> None:
-        """Combines task with command according to agent-specific syntax.
-
-        Input:
-            task: str
-               - natural language instruction
-               - non-empty string
-            command: TCommand
-               - agent-specific command model
-               - mutated with task context
-
-        Side Effects:
-            - runs agent inside secure Docker sandbox
-        """
-        if task:
-            injected_task = [token.format(task=task) for token in command.task_injection_template]
-            command.args += injected_task
-        with st.spinner("Running agent in secure sandbox; interact via its UI if opened."):
-            self._execute_agent_command(command)
-
-    def get_command_class(self) -> type[TCommand]:
-        """Get the command class associated with this agent using generic type resolution."""
-        for cls in self.__class__.__mro__:
-            orig_bases = getattr(cls, "__orig_bases__", ())
-            for base in orig_bases:
-                if get_origin(base) is CodeAgent:
-                    args = get_args(base)
-                    if args:
-                        return args[0]
-        raise NotImplementedError(f"Could not determine command class for {self.__class__.__name__}")
-
     def ui_define_command(self) -> TCommand:
-        """Generic UI definition for automatic inheritance of UI elements."""
+        """Render UI for command configuration."""
         command_class = self.get_command_class()
         st.markdown(f"# {self.__class__.__name__} Command")
-        with st.expander("", expanded=True):
+
+        with st.expander("Configuration", expanded=True):
             field_values = command_class.ui_define_fields()
 
             extra_args_str = st.text_input(
-                "Extra CLI arguments (optional)",
+                "Extra CLI arguments",
                 value="",
                 key=f"{self.__class__.__name__.lower()}_extra_args",
                 help="Space-separated extra arguments passed directly to the CLI",
             )
             extra_args = extra_args_str.split() if extra_args_str.strip() else []
 
+            # Inject system fields
             field_values["workspace"] = self.path_agent_workspace
-            field_values["args"] = extra_args + (field_values.get("args", []))
+            field_values["args"] = extra_args + field_values.get("args", [])
 
             command = command_class(**field_values)
 
-            with st.expander("Display Command", expanded=True):
-                args = command.construct_args()
-                formatted_args = "\n\t".join(args)
+            with st.expander("Preview Command", expanded=True):
+                formatted_args = " ".join(command.construct_args())
                 st.code(f"{command.executable} {formatted_args}", language="bash")
 
         return command
 
     def get_diff(self) -> str:
         """Return git diff for workspace."""
-        result = subprocess.run(
-            ["git", "-C", str(self.path_agent_workspace), "diff"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.stdout
+        return subprocess.run(
+            ["git", "-C", str(self.path_agent_workspace), "diff"], capture_output=True, text=True, check=False
+        ).stdout

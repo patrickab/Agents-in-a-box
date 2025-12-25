@@ -66,7 +66,6 @@ def model_selector(key: str) -> dict:
 
 class AiderCommand(AgentCommand):
     """Aider-specific command definition."""
-
     # Baseclass constants
     executable: str = "aider"
     task_injection_template: ClassVar[List[str]] = ["--message", "{task}"]

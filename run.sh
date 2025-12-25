@@ -1,4 +1,3 @@
-#!/bin/sh
-uv lock --upgrade
+#!/bin/bash
 uv sync
-streamlit run  src/code_agents/agents.py
+uv run streamlit run src/code_agents/agents.py
