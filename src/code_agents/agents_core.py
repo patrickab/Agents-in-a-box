@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 import streamlit as st
 
 from code_agents.lib.config import PATH_SANDBOX
+from code_agents.lib.logger import get_logger
 from code_agents.sandbox import DockerSandbox
 
 OLLAMA_PORT = 11434
@@ -26,6 +27,7 @@ ENV_VARS = {
     "GIT_COMMITTER_EMAIL": GIT_EMAIL,
 }
 
+logger = get_logger()
 
 class AgentCommand(BaseModel, ABC):
     """Base command model for external agent processes.
@@ -125,9 +127,7 @@ class AgentCommand(BaseModel, ABC):
 
         return st.text_input(desc, value=default or "", key=key)
 
-
 TCommand = TypeVar("TCommand", bound=AgentCommand)
-
 
 class CodeAgent(ABC, Generic[TCommand]):
     """Generic base class for Code Agents.
@@ -163,9 +163,19 @@ class CodeAgent(ABC, Generic[TCommand]):
             self.repo_url = repo_url
             self.branch = branch
             self.path_agent_workspace = self._initialize_workspace()
+            logger.info(
+                "[bold cyan]Workspace ready[/bold cyan] · repo=[bold]%s[/bold] branch=[bold]%s[/bold] path=[bold]%s[/bold]",
+                self.repo_url,
+                self.branch,
+                self.path_agent_workspace,
+            )
         else:
             # CLI initialization
             self.path_agent_workspace = Path.cwd()
+            logger.info(
+                "[bold cyan]Workspace ready (CLI)[/bold cyan] · path=[bold]%s[/bold]",
+                self.path_agent_workspace,
+            )
 
     def _initialize_workspace(self) -> Path:
         """Setup agent workspace: clone, checkout, install deps."""
@@ -173,35 +183,66 @@ class CodeAgent(ABC, Generic[TCommand]):
         workspace = Path(PATH_SANDBOX) / repo_name
         workspace.parent.mkdir(parents=True, exist_ok=True)
 
+        logger.info(
+            "[bold magenta]Preparing workspace[/bold magenta] · repo=[bold]%s[/bold] dir=[bold]%s[/bold]",
+            self.repo_url,
+            workspace,
+        )
+
         self._git_checkout(workspace)
         self._install_dependencies(workspace)
+
+        logger.info(
+            "[green]Workspace prepared[/green] · dir=[bold]%s[/bold]",
+            workspace,
+        )
         return workspace
 
     def _git_checkout(self, workspace: Path) -> None:
         """Setup agent workspace: clone, checkout branch, install deps."""
         try:
-            # hard reset if changes exist
             if (workspace / ".git").exists():
+                logger.info(
+                    "[yellow]Updating existing repo[/yellow] · path=[bold]%s[/bold]",
+                    workspace,
+                )
                 repo = Repo(workspace)
                 repo.git.reset("--hard")
                 repo.remotes.origin.pull()
             else:
+                logger.info(
+                    "[yellow]Cloning repo[/yellow] · url=[bold]%s[/bold] into [bold]%s[/bold]",
+                    self.repo_url,
+                    workspace,
+                )
                 repo = Repo.clone_from(self.repo_url, workspace)
 
             # Checkout logic
             if self.branch in repo.heads:
+                logger.info(
+                    "Checking out existing branch [bold]%s[/bold]",
+                    self.branch,
+                )
                 repo.heads[self.branch].checkout()
             else:
-                # Determine default branch safely
                 try:
                     head_ref = repo.remotes.origin.refs["HEAD"].reference.name
                     default_branch = head_ref.split("/")[-1]
                 except (IndexError, AttributeError, ValueError):
                     default_branch = "main"
 
+                logger.info(
+                    "Creating branch [bold]%s[/bold] from [bold]%s[/bold]",
+                    self.branch,
+                    default_branch,
+                )
                 repo.git.checkout("-b", self.branch, f"origin/{default_branch}")
 
         except (GitCommandError, Exception) as e:
+            logger.error(
+                "[bold red]Git operation failed[/bold red] · %s",
+                str(e),
+            )
             st.error(f"Git operation failed: {e}")
             raise
 
@@ -210,12 +251,22 @@ class CodeAgent(ABC, Generic[TCommand]):
         cmd = None
         if (workspace / "requirements.txt").exists():
             cmd = ["uv", "pip", "install", "-r", "requirements.txt"]
+            logger.info(
+                "[blue]Installing dependencies[/blue] · file=[bold]requirements.txt[/bold]"
+            )
         elif (workspace / "pyproject.toml").exists():
             cmd = ["uv", "pip", "install", "-e", "."]
+            logger.info(
+                "[blue]Installing dependencies[/blue] · file=[bold]pyproject.toml[/bold]"
+            )
 
         if cmd:
-            with contextlib.suppress(FileNotFoundError):
+            try:
                 subprocess.run(cmd, cwd=workspace, check=False, capture_output=True)
+            except FileNotFoundError:
+                logger.warning(
+                    "[bold yellow]Dependency install skipped[/bold yellow] · `uv` not found on PATH"
+                )
 
     def get_command_class(self) -> Type[TCommand]:
         """Resolve the command class from generics."""
@@ -252,6 +303,12 @@ class CodeAgent(ABC, Generic[TCommand]):
         else:  # already a shell string
             cmd_str = raw_cmd
 
+        logger.info(
+            "[bold magenta]Launching agent[/bold magenta] · image=[bold]%s:latest[/bold]\n[dim]$ %s[/dim]",
+            self.DOCKERTAG,
+            cmd_str,
+        )
+
         sandbox = DockerSandbox(dockerimage_name=f"{self.DOCKERTAG}:latest")
         try:
             sandbox.run_interactive_shell(
@@ -260,6 +317,10 @@ class CodeAgent(ABC, Generic[TCommand]):
                 env_vars=ENV_VARS,
             )
         except Exception as exc:
+            logger.error(
+                "[bold red]Agent run failed[/bold red] · %s",
+                str(exc),
+            )
             st.error(f"Failed to run agent in sandbox: {exc}")
             raise
 
@@ -301,11 +362,20 @@ class CodeAgent(ABC, Generic[TCommand]):
             env = os.environ.copy()
             env.pop("VIRTUAL_ENV", None)
 
+            logger.info(
+                "[bold magenta]Running workspace script[/bold magenta] · path=[bold]%s[/bold]\n[dim]$ ./run.sh[/dim]",
+                self.path_agent_workspace,
+            )
+
             subprocess.run(
                 ["./run.sh"],
                 cwd=self.path_agent_workspace,
                 env=env,
             )
         except Exception as exc:
+            logger.error(
+                "[bold red]Workspace script failed[/bold red] · %s",
+                str(exc),
+            )
             st.error(f"Failed to run workspace script: {exc}")
             raise
