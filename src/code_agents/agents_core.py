@@ -10,7 +10,7 @@ from llm_baseclient.config import OLLAMA_PORT
 from pydantic import BaseModel, Field
 import streamlit as st
 
-from code_agents.config import PATH_SANDBOX
+from code_agents.lib.config import PATH_SANDBOX
 from code_agents.sandbox import DockerSandbox
 
 GIT_NAME = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True).stdout.strip()

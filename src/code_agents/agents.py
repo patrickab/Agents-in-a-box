@@ -9,9 +9,9 @@ import git
 from pydantic import Field
 import streamlit as st
 
-from code_agents.agent_prompts import SYS_EMPTY, SYS_REFACTOR
 from code_agents.agents_core import AgentCommand, CodeAgent
-from code_agents.config import (
+from code_agents.lib.agent_prompts import SYS_EMPTY, SYS_REFACTOR
+from code_agents.lib.config import (
     DOCKERTAG_AIDER,
     DOCKERTAG_CLAUDE,
     DOCKERTAG_CODEX,
@@ -133,6 +133,7 @@ class OpenCodeCommand(AgentCommand):
     edit_format: Literal["diff", "whole", "udiff"] = Field(default="diff", description="Edit format")
     map_tokens: Literal[1024, 2048, 4096, 8192] = Field(default=1024, description="Context map tokens")
     stream: bool = Field(default=False, description="Enable streaming output")
+
 
 class OpenCode(CodeAgent[OpenCodeCommand]):
     """OpenCode Code Agent."""

@@ -55,7 +55,7 @@ from typing import Dict, Optional
 
 import docker
 
-from code_agents.logger import get_logger
+from code_agents.lib.logger import get_logger
 
 
 class SecurityEnvironmentError(Exception):
