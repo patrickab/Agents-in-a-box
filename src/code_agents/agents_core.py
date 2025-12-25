@@ -157,10 +157,15 @@ class CodeAgent(ABC, Generic[TCommand]):
 
     DOCKERTAG: str
 
-    def __init__(self, repo_url: str, branch: str) -> None:
-        self.repo_url = repo_url
-        self.branch = branch
-        self.path_agent_workspace = self._initialize_workspace()
+    def __init__(self, repo_url: Optional[str], branch: Optional[str]) -> None:
+        if repo_url and not branch:
+            # Streamlit UI initialization
+            self.repo_url = repo_url
+            self.branch = branch
+            self.path_agent_workspace = self._initialize_workspace()
+        else:
+            # CLI initialization
+            self.path_agent_workspace = Path.cwd()
 
     def _initialize_workspace(self) -> Path:
         """Setup agent workspace: clone, checkout, install deps."""
@@ -235,6 +240,15 @@ class CodeAgent(ABC, Generic[TCommand]):
             sandbox.run_interactive_shell(repo_path=str(self.path_agent_workspace), agent_cmd=cmd_str, env_vars=command.env_vars)
         except Exception as exc:
             st.error(f"Failed to run agent in sandbox: {exc}")
+            raise
+
+    def run_cli(self, cmd: list[str]) -> None:
+        """Execute arbitrary CLI command in the agent workspace."""
+        sandbox = DockerSandbox(dockerimage_name=f"{self.DOCKERTAG}:latest")
+        try:
+            sandbox.run_interactive_shell(repo_path=str(self.path_agent_workspace), agent_cmd=cmd, env_vars=ENV_VARS)
+        except Exception as exc:
+            st.error(f"Failed to run CLI in sandbox: {exc}")
             raise
 
     def ui_define_command(self) -> TCommand:
