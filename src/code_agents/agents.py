@@ -66,6 +66,7 @@ def model_selector(key: str) -> dict:
 
 class AiderCommand(AgentCommand):
     """Aider-specific command definition."""
+
     # Baseclass constants
     executable: str = "aider"
     task_injection_template: ClassVar[List[str]] = ["--message", "{task}"]
@@ -371,21 +372,28 @@ def agent_controls() -> None:
                     type="secondary",
                     on_click=lambda: selected_agent.run(command=st.session_state.command, task=task),
                 )
+                st.button(
+                    "Test Code",
+                    use_container_width=True,
+                    type="secondary",
+                    on_click=lambda: selected_agent.run_workspace(),
+                )
 
             with col_2:
                 if st.button("Reset Agent", use_container_width=True):
                     del st.session_state.selected_agent
                     st.rerun()
 
-            if st.button("Sync Agent Workspace", use_container_width=True):
-                count, target_root = sync_to_home(
-                    workspace=selected_agent.path_agent_workspace,
-                    repo_url=repo_url,
-                )
-                if count > 0:
-                    st.success(f"Copied {count} file(s) to `{target_root}`.")
-                else:
-                    st.info("No changed files to sync.")
+                if st.button("Sync Code", use_container_width=True):
+                    count, target_root = sync_to_home(
+                        workspace=selected_agent.path_agent_workspace,
+                        repo_url=repo_url,
+                    )
+                    if count > 0:
+                        st.success(f"Copied {count} file(s) to `{target_root}`.")
+                    else:
+                        st.info("No changed files to sync.")
+
         st.markdown("---")
 
         # Define command last to render UI controls last

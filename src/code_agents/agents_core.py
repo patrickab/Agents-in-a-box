@@ -8,7 +8,6 @@ from typing import Any, Dict, Generic, List, Literal, Optional, Type, TypeVar, g
 from git import GitCommandError, Repo
 from llm_baseclient.config import OLLAMA_PORT
 from pydantic import BaseModel, Field
-from pydantic_core import PydanticUndefined
 import streamlit as st
 
 from code_agents.config import PATH_SANDBOX
@@ -125,6 +124,7 @@ class AgentCommand(BaseModel, ABC):
 
         return st.text_input(desc, value=default or "", key=key)
 
+
 TCommand = TypeVar("TCommand", bound=AgentCommand)
 
 
@@ -174,7 +174,7 @@ class CodeAgent(ABC, Generic[TCommand]):
     def _git_checkout(self, workspace: Path) -> None:
         """Setup agent workspace: clone, checkout branch, install deps."""
         try:
-            # hard reset if changes exist            
+            # hard reset if changes exist
             if (workspace / ".git").exists():
                 repo = Repo(workspace)
                 repo.git.reset("--hard")
@@ -269,3 +269,17 @@ class CodeAgent(ABC, Generic[TCommand]):
         return subprocess.run(
             ["git", "-C", str(self.path_agent_workspace), "diff"], capture_output=True, text=True, check=False
         ).stdout
+
+    def run_workspace(self) -> None:
+        try:
+            env = os.environ.copy()
+            env.pop("VIRTUAL_ENV", None)
+
+            subprocess.run(
+                ["./run.sh"],
+                cwd=self.path_agent_workspace,
+                env=env,
+            )
+        except Exception as exc:
+            st.error(f"Failed to run workspace script: {exc}")
+            raise
