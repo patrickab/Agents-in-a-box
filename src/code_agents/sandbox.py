@@ -170,4 +170,7 @@ class DockerSandbox:
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
-            raise ContainerRuntimeError(f"Container execution failed: {e}")
+            raise ContainerRuntimeError(
+                f"Container execution failed with exit code {e.returncode}. "
+                f"Command: {' '.join(cmd)}"
+            ) from e

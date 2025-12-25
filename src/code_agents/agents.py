@@ -21,6 +21,9 @@ from code_agents.lib.config import (
 
 logger = logging.getLogger(__name__)
 
+# [Architect, Editor]
+DEFAULT_ARCHITECT_AIDER = "openai/gpt-5.1"
+DEFAULT_EDITOR_AIDER = "ollama/devstral-2:123b-cloud"
 DEFAULT_ARGS_AIDER = ["--dark-mode", "--code-theme", "inkpot", "--pretty"]
 
 
@@ -61,11 +64,11 @@ class AiderCommand(AgentCommand):
     task_injection_template: ClassVar[List[str]] = ["--message", "{task}"]
 
     # Variables
-    model: str = Field(..., description="Architect LLM identifier")
-    editor_model: str = Field(..., description="Editor LLM identifier")
+    model: str = Field(default=DEFAULT_ARCHITECT_AIDER, description="Architect LLM identifier")
+    editor_model: str = Field(default=DEFAULT_EDITOR_AIDER, description="Editor LLM identifier")
     reasoning_effort: Literal["low", "medium", "high"] = Field(default="high", description="Reasoning effort")
     edit_format: Literal["diff", "whole", "udiff"] = Field(default="diff", description="Edit format")
-    map_tokens: Literal[1024, 2048, 4096, 8192] = Field(default=4096, description="Context map tokens")
+    map_tokens: Literal[1024, 2048, 4096, 8192] = Field(default=1024, description="Context map tokens")
 
 
 class Aider(CodeAgent[AiderCommand]):

@@ -3,11 +3,10 @@ name = "Agents-in-a-box"
 version = "0.1.0"
 description = "Standalone secure code agent with Docker sandboxing"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "docker>=7.1.0",
     "gitpython>=3.1.0",
-    "llm-baseclient @ git+ssh://git@github.com/patrickab/llm-baseclient.git@main",
     "pydantic>=2.0.0",
     "rich>=13.0.0",
     "streamlit>=1.51.0",
@@ -18,7 +17,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-agent-box = "code_agents.code_agents:main" 
+agent-sandbox = "code_agents.app_cli:main" 
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/code_agents"]

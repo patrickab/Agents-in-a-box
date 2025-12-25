@@ -6,13 +6,13 @@ import subprocess
 from typing import Generic, Literal, Optional, Type, TypeVar, get_args, get_origin
 
 from git import GitCommandError, Repo
-from llm_baseclient.config import OLLAMA_PORT
 from pydantic import BaseModel, Field
 import streamlit as st
 
 from code_agents.lib.config import PATH_SANDBOX
 from code_agents.sandbox import DockerSandbox
 
+OLLAMA_PORT = 11434
 GIT_NAME = subprocess.run(["git", "config", "--global", "user.name"], capture_output=True, text=True).stdout.strip()
 GIT_EMAIL = subprocess.run(["git", "config", "--global", "user.email"], capture_output=True, text=True).stdout.strip()
 ENV_VARS = {
@@ -157,8 +157,8 @@ class CodeAgent(ABC, Generic[TCommand]):
 
     DOCKERTAG: str
 
-    def __init__(self, repo_url: Optional[str], branch: Optional[str]) -> None:
-        if repo_url and not branch:
+    def __init__(self, repo_url: Optional[str] = None, branch: Optional[str] = None) -> None:
+        if repo_url and branch:
             # Streamlit UI initialization
             self.repo_url = repo_url
             self.branch = branch
@@ -227,28 +227,40 @@ class CodeAgent(ABC, Generic[TCommand]):
                         return args[0]
         raise NotImplementedError(f"Could not determine command class for {self.__class__.__name__}")
 
-    def run(self, command: TCommand, task: Optional[str] = None) -> None:
-        """Execute the agent command."""
-        if task and command.task_injection_template:
-            injected_task = [token.format(task=task) for token in command.task_injection_template]
-            command.args.extend(injected_task)
+    def run(
+        self,
+        command: Optional[TCommand] = None,
+        raw_cmd: Optional[str] = None,
+        task: Optional[str] = None,
+    ) -> None:
+        """
+        Unified execution entrypoint.
 
-        cmd_str = subprocess.list2cmdline([command.executable, *command.construct_args()])
+        - If `command` is provided: use AgentCommand (with task injection, env from command).
+        - If `raw_cmd` is provided: run that shell string directly.
+        Exactly one of `command` or `raw_cmd` must be provided.
+        """
+        if (command is None) == (raw_cmd is None):
+            raise ValueError("Exactly one of `command` or `raw_cmd` must be provided")
+
+        if command is not None:
+            if task and command.task_injection_template:
+                injected_task = [token.format(task=task) for token in command.task_injection_template]
+                command.args.extend(injected_task)
+
+            cmd_str = subprocess.list2cmdline([command.executable, *command.construct_args()])
+        else:  # already a shell string
+            cmd_str = raw_cmd
 
         sandbox = DockerSandbox(dockerimage_name=f"{self.DOCKERTAG}:latest")
         try:
-            sandbox.run_interactive_shell(repo_path=str(self.path_agent_workspace), agent_cmd=cmd_str, env_vars=command.env_vars)
+            sandbox.run_interactive_shell(
+                repo_path=str(self.path_agent_workspace),
+                agent_cmd=cmd_str,
+                env_vars=ENV_VARS,
+            )
         except Exception as exc:
             st.error(f"Failed to run agent in sandbox: {exc}")
-            raise
-
-    def run_cli(self, cmd: list[str]) -> None:
-        """Execute arbitrary CLI command in the agent workspace."""
-        sandbox = DockerSandbox(dockerimage_name=f"{self.DOCKERTAG}:latest")
-        try:
-            sandbox.run_interactive_shell(repo_path=str(self.path_agent_workspace), agent_cmd=cmd, env_vars=ENV_VARS)
-        except Exception as exc:
-            st.error(f"Failed to run CLI in sandbox: {exc}")
             raise
 
     def ui_define_command(self) -> TCommand:

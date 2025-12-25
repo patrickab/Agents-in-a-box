@@ -8,7 +8,7 @@
             "module": "streamlit",
             "args": [
                 "run",
-                "${workspaceFolder}/src/code_agents/app.py"
+                "${workspaceFolder}/src/code_agents/app_ui.py"
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"

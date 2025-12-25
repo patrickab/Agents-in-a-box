@@ -1,19 +1,54 @@
 # ruff: noqa: F403
+import argparse
+import sys
+from typing import Type
+
 from code_agents.agents import *
 from code_agents.agents_core import AgentCommand, CodeAgent
-import argparse
 
-# --------- Dynamic discovery of subclasses --------- #
+# Dynamic discovery of subclasses
 agent_subclasses = CodeAgent.__subclasses__()
-agent_subclass_dict = {cls.__name__: cls for cls in agent_subclasses}
+agent_subclass_dict = {cls.__name__.lower(): cls for cls in agent_subclasses}
 agent_subclass_names = list(agent_subclass_dict.keys())
 
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="code-agents",
+        description="Run code agents inside a secure Docker sandbox.",
+        usage="%(prog)s <agent> [command...]",
+    )
+    parser.add_argument(
+        "agent",
+        help=f"Agent class to run (one of: {', '.join(sorted(agent_subclass_names))})",
+    )
+    parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Optional shell command to run inside the agent sandbox",
+    )
+
+    args = parser.parse_args(argv)
+
+    agent_name = args.agent.lower()
+    Agent: Type[CodeAgent] = agent_subclass_dict.get(agent_name)
+
+    if Agent is None:
+        parser.error(f"Unknown agent '{args.agent}'. Available: {', '.join(sorted(agent_subclass_names))}")
+
+    agent: CodeAgent = Agent()
+    Command: Type[AgentCommand] = agent.get_command_class()
+    command = Command()
+
+    if not args.command:
+        # `<cli-app> <code-agent>` -> use Pydantic defaults of the command class
+        print(f"Running default command: {command.executable} {' '.join(command.construct_args())}")
+        agent.run(command=command)
+    else:
+        # `<cli-app> <code-agent> <custom args>` -> use raw command string
+        raw_cmd = " ".join([command.executable, *args.command])
+        agent.run(raw_cmd=raw_cmd)
+
+
 if __name__ == "__main__":
-    
-# required features
-# 1. argparse: 
-#       parse first arg as agent subclass (map names to lowercase), return error if not found
-#       -h --help shows available agents
-#       case 1: <module> <agent_subclass> (without args) -> launch CLI with defaults: CodeAgent.run(command)
-#       case 2: <module> <agent_subclass> [args...] -> launch CLI with: CodeAgent.run_cli(args)
-# 2. always initialize CodeAgent with empty args to avoid repo cloning
+    main(sys.argv[1:])
