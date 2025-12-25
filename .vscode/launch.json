@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Streamlit App",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "${workspaceFolder}/src/code_agents/agents.py"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
+            "envFile": "${workspaceFolder}/.env",
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        }
+    ]
+}
