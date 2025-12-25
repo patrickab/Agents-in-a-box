@@ -3,7 +3,7 @@ import contextlib
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Dict, Generic, List, Literal, Optional, Type, TypeVar, get_args, get_origin
+from typing import Generic, Literal, Optional, Type, TypeVar, get_args, get_origin
 
 from git import GitCommandError, Repo
 from llm_baseclient.config import OLLAMA_PORT
@@ -46,16 +46,16 @@ class AgentCommand(BaseModel, ABC):
 
     executable: str = Field(..., description="CLI executable name")
     workspace: Path = Field(default_factory=Path.cwd, description="Agent workspace directory")
-    args: List[str] = Field(default_factory=list, description="CLI arguments excluding executable")
-    task_injection_template: List[str] = Field(default_factory=list, description="Task injection template")
-    env_vars: Dict[str, str] = Field(default=ENV_VARS, description="Environment variable overrides")
+    args: list[str] = Field(default_factory=list, description="CLI arguments excluding executable")
+    task_injection_template: list[str] = Field(default_factory=list, description="Task injection template")
+    env_vars: dict[str, str] = Field(default=ENV_VARS, description="Environment variable overrides")
 
     def _snake_to_kebab(self, s: str) -> str:
         """Convert snake_case to kebab-case."""
         return s.replace("_", "-")
 
     @classmethod
-    def construct_args_from_values(cls, **field_values: Dict[str, Any]) -> List[str]:
+    def construct_args_from_values(cls, **field_values: dict[str, any]) -> list[str]:
         """Construct argument list from field values."""
         temp_instance = cls(**field_values)
         args = [
@@ -67,7 +67,7 @@ class AgentCommand(BaseModel, ABC):
         additional_args = field_values.get("args", [])
         return args + additional_args
 
-    def construct_args(self) -> List[str]:
+    def construct_args(self) -> list[str]:
         """Construct argument list."""
         fields = self.model_dump(exclude={"executable", "workspace", "args", "env_vars", "task_injection_template"})
         args = [
@@ -76,9 +76,9 @@ class AgentCommand(BaseModel, ABC):
         return args + self.args
 
     @classmethod
-    def ui_define_fields(cls) -> Dict[str, Any]:
+    def ui_define_fields(cls) -> dict[str, any]:
         """Generate UI elements for all pydantic fields and return their values."""
-        values: Dict[str, Any] = {}
+        values: dict[str, any] = {}
         base_excluded = {"executable", "workspace", "args", "env_vars", "task_injection_template"}
 
         for name, field in cls.model_fields.items():
@@ -94,19 +94,19 @@ class AgentCommand(BaseModel, ABC):
         return values
 
     @staticmethod
-    def _render_ui_field(desc: str, default: Any, t: Any, key: str) -> Any:  # noqa
+    def _render_ui_field(desc: str, default: any, t: any, key: str) -> any:  # noqa
         origin = get_origin(t)
         args = get_args(t)
 
         if t is bool:
-            return st.checkbox(desc, value=default or False, key=key)
+            return st.toggle(desc, value=default or False, key=key)
 
         if origin is Literal:
             options = list(args)
             idx = options.index(default) if default in options else 0
             return st.selectbox(desc, options=options, index=idx, key=key)
 
-        if origin in (list, List):
+        if origin in (list, list):
             inner = args[0] if args else type(None)
             if get_origin(inner) is Literal:
                 options = list(get_args(inner))
