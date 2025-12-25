@@ -70,6 +70,7 @@ class AgentCommand(BaseModel, ABC):
     def construct_args(self) -> list[str]:
         """Construct argument list."""
         fields = self.model_dump(exclude={"executable", "workspace", "args", "env_vars", "task_injection_template"})
+        fields = {k: v for k, v in fields.items() if v is not False}
         args = [
             item for k, v in fields.items() for item in ([f"--{self._snake_to_kebab(k)}"] + ([] if isinstance(v, bool) else [str(v)]))
         ]
@@ -259,8 +260,7 @@ class CodeAgent(ABC, Generic[TCommand]):
             command = command_class(**field_values)
 
             with st.expander("Preview Command", expanded=True):
-                formatted_args = " ".join(command.construct_args())
-                st.code(f"{command.executable} {formatted_args}", language="bash")
+                st.code("\n\t".join([command.executable, *command.construct_args()]), language="bash")
 
         return command
 
