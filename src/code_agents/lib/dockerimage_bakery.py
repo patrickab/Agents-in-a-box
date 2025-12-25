@@ -8,7 +8,7 @@ import os
 
 import docker
 
-from code_agents.config import DOCKERFILE_BASE, DOCKERFILE_DEFINITIONS, DOCKERFILES_PATH, DOCKERTAG_BASE, PROJECT_ROOT
+from code_agents.lib.config import DOCKERFILE_BASE, DOCKERFILE_DEFINITIONS, DOCKERFILES_PATH, DOCKERTAG_BASE, PROJECT_ROOT
 
 
 class DockerImageBakery:
