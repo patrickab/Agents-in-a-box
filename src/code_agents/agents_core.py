@@ -1,5 +1,4 @@
 from abc import ABC
-import contextlib
 import os
 from pathlib import Path
 import subprocess
@@ -29,21 +28,19 @@ ENV_VARS = {
 
 logger = get_logger()
 
-class AgentCommand(BaseModel, ABC):
-    """Base command model for external agent processes.
 
-    Input:
-        executable: str
-           - preinstalled CLI executable name
-        workspace: Path
-           - absolute or relative filesystem path
-           - must exist before execution
-        args: list[str]
-           - ordered CLI arguments
-           - no executable included
-        env_vars: dict[str, str] | None
-           - environment variable overrides
-           - merged over os.environ
+class AgentCommand(BaseModel, ABC):
+    """Base command model for invoking external agent CLIs.
+
+    Args:
+        executable: Preinstalled CLI name on PATH.
+        workspace: Absolute or relative working directory; must exist before run.
+        args: Ordered CLI arguments excluding the executable.
+        task_injection_template: Token sequence used to inject task text into args.
+        env_vars: Environment overrides merged over the current process environment.
+
+    Returns:
+        Immutable configuration object used to construct a shell command line.
     """
 
     executable: str = Field(..., description="CLI executable name")
@@ -53,24 +50,16 @@ class AgentCommand(BaseModel, ABC):
     env_vars: dict[str, str] = Field(default=ENV_VARS, description="Environment variable overrides")
 
     def _snake_to_kebab(self, s: str) -> str:
-        """Convert snake_case to kebab-case."""
+        """Convert snake_case string to kebab-case."""
         return s.replace("_", "-")
 
     @classmethod
-    def construct_args_from_values(cls, **field_values: dict[str, any]) -> list[str]:
-        """Construct argument list from field values."""
-        temp_instance = cls(**field_values)
-        args = [
-            item
-            for k, v in field_values.items()
-            if k not in {"executable", "workspace", "args", "env_vars", "task_injection_template"}
-            for item in ([f"--{temp_instance._snake_to_kebab(k)}"] + ([] if isinstance(v, bool) else [str(v)]))
-        ]
-        additional_args = field_values.get("args", [])
-        return args + additional_args
-
     def construct_args(self) -> list[str]:
-        """Construct argument list."""
+        """Build CLI argument list from this command instance.
+
+        Returns:
+            Flat list of CLI arguments derived from model fields and extra args.
+        """
         fields = self.model_dump(exclude={"executable", "workspace", "args", "env_vars", "task_injection_template"})
         fields = {k: v for k, v in fields.items() if v is not False}
         args = [
@@ -80,7 +69,11 @@ class AgentCommand(BaseModel, ABC):
 
     @classmethod
     def ui_define_fields(cls) -> dict[str, any]:
-        """Generate UI elements for all pydantic fields and return their values."""
+        """Render Streamlit inputs for all configurable fields and collect values.
+
+        Returns:
+            Mapping of field names to values captured from the UI.
+        """
         values: dict[str, any] = {}
         base_excluded = {"executable", "workspace", "args", "env_vars", "task_injection_template"}
 
@@ -98,6 +91,17 @@ class AgentCommand(BaseModel, ABC):
 
     @staticmethod
     def _render_ui_field(desc: str, default: any, t: any, key: str) -> any:  # noqa
+        """Render a Streamlit widget for a single field and return its value.
+
+        Args:
+            desc: Human-readable label for the widget.
+            default: Default value used when no user input exists.
+            t: Type annotation or typing construct for the field.
+            key: Unique Streamlit key for widget state.
+
+        Returns:
+            Value captured from the rendered widget.
+        """
         origin = get_origin(t)
         args = get_args(t)
 
@@ -127,44 +131,49 @@ class AgentCommand(BaseModel, ABC):
 
         return st.text_input(desc, value=default or "", key=key)
 
+
 TCommand = TypeVar("TCommand", bound=AgentCommand)
 
+
 class CodeAgent(ABC, Generic[TCommand]):
-    """Generic base class for Code Agents.
+    """Base class for code agents executed inside a Docker sandbox.
+
+    Supports two initialization modes:
+    - CLI mode: no arguments; uses the current working directory as the workspace.
+    - UI mode: ``branch`` and ``repo_url`` provided; prepares a sandboxed workspace
+      from a Git repository.
 
     Class Attributes:
-        DOCKERTAG: str
-           - Docker image tag for agent execution
+        DOCKERTAG: Docker image tag used for sandbox execution.
 
-    Input:
-        repo_url: str
-           - HTTPS or SSH git URL
-           - points to accessible repository
-        branch: str
-           - existing or new branch name
-           - non-empty string
+    Args:
+        branch (str, optional): Git branch to check out (UI mode only).
+        repo_url (str, optional): Git repository URL (UI mode only).
 
-    Output:
-        instance: CodeAgent
-           - initialized workspace path
-           - ready for command execution
+    Returns:
+        Initialized agent instance ready for command execution.
 
-    Side Effects:
-        - creates ~/agent_sandbox directory
-        - clones or updates git repository
-        - may install Python dependencies (if requirements.txt or pyproject.toml present)
+    Note:
+        In UI mode, the workspace is created or reused under ``PATH_SANDBOX`` and
+        may install Python dependencies using ``uv``.
     """
 
     DOCKERTAG: str
 
     def __init__(self, repo_url: Optional[str] = None, branch: Optional[str] = None) -> None:
+        """Initialize agent workspace from repo URL/branch or current directory.
+
+        Args:
+            repo_url: Remote repository URL; when omitted, use current working directory.
+            branch: Target branch name when cloning/updating the repository.
+        """
         if repo_url and branch:
             # Streamlit UI initialization
             self.repo_url = repo_url
             self.branch = branch
             self.path_agent_workspace = self._initialize_workspace()
             logger.info(
-                "[bold cyan]Workspace ready[/bold cyan] · repo=[bold]%s[/bold] branch=[bold]%s[/bold] path=[bold]%s[/bold]",
+                "[bold cyan]Repository cloned & initialized ready[/bold cyan] · repo=[bold]%s[/bold] branch=[bold]%s[/bold] path=[bold]%s[/bold]",  # noqa
                 self.repo_url,
                 self.branch,
                 self.path_agent_workspace,
@@ -178,7 +187,11 @@ class CodeAgent(ABC, Generic[TCommand]):
             )
 
     def _initialize_workspace(self) -> Path:
-        """Setup agent workspace: clone, checkout, install deps."""
+        """Prepare workspace directory by cloning repo, checking out branch, and installing deps.
+
+        Returns:
+            Absolute path to the prepared workspace directory.
+        """
         repo_name = self.repo_url.rstrip("/").split("/")[-1].replace(".git", "")
         workspace = Path(PATH_SANDBOX) / repo_name
         workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -199,7 +212,15 @@ class CodeAgent(ABC, Generic[TCommand]):
         return workspace
 
     def _git_checkout(self, workspace: Path) -> None:
-        """Setup agent workspace: clone, checkout branch, install deps."""
+        """Clone or update the git repository and check out the target branch.
+
+        Args:
+            workspace: Filesystem path where the repository should reside.
+
+        Raises:
+            GitCommandError: If git operations fail.
+            Exception: For unexpected git-related failures.
+        """
         try:
             if (workspace / ".git").exists():
                 logger.info(
@@ -247,36 +268,33 @@ class CodeAgent(ABC, Generic[TCommand]):
             raise
 
     def _install_dependencies(self, workspace: Path) -> None:
-        """Best-effort dependency installation using uv."""
+        """Best-effort Python dependency installation using uv."""
         cmd = None
         if (workspace / "requirements.txt").exists():
             cmd = ["uv", "pip", "install", "-r", "requirements.txt"]
-            logger.info(
-                "[blue]Installing dependencies[/blue] · file=[bold]requirements.txt[/bold]"
-            )
+            logger.info("[blue]Installing dependencies[/blue] · file=[bold]requirements.txt[/bold]")
         elif (workspace / "pyproject.toml").exists():
             cmd = ["uv", "pip", "install", "-e", "."]
-            logger.info(
-                "[blue]Installing dependencies[/blue] · file=[bold]pyproject.toml[/bold]"
-            )
+            logger.info("[blue]Installing dependencies[/blue] · file=[bold]pyproject.toml[/bold]")
 
         if cmd:
             try:
                 subprocess.run(cmd, cwd=workspace, check=False, capture_output=True)
             except FileNotFoundError:
-                logger.warning(
-                    "[bold yellow]Dependency install skipped[/bold yellow] · `uv` not found on PATH"
-                )
+                logger.warning("[bold yellow]Dependency install skipped[/bold yellow] · `uv` not found on PATH")
 
     def get_command_class(self) -> Type[TCommand]:
-        """Resolve the command class from generics."""
+        """Resolve the concrete AgentCommand subclass from the generic parameter.
+
+        Returns:
+            Command class bound to this CodeAgent subclass.
+        """
         for cls in self.__class__.__mro__:
             for base in getattr(cls, "__orig_bases__", []):
                 if get_origin(base) is CodeAgent:
                     args = get_args(base)
                     if args and issubclass(args[0], AgentCommand):
                         return args[0]
-        raise NotImplementedError(f"Could not determine command class for {self.__class__.__name__}")
 
     def run(
         self,
@@ -284,12 +302,16 @@ class CodeAgent(ABC, Generic[TCommand]):
         raw_cmd: Optional[str] = None,
         task: Optional[str] = None,
     ) -> None:
-        """
-        Unified execution entrypoint.
+        """Execute an agent command inside a Docker sandbox.
 
-        - If `command` is provided: use AgentCommand (with task injection, env from command).
-        - If `raw_cmd` is provided: run that shell string directly.
-        Exactly one of `command` or `raw_cmd` must be provided.
+        Args:
+            command: Structured AgentCommand to execute; mutually exclusive with raw_cmd.
+            raw_cmd: Raw shell command string to run as-is; mutually exclusive with command.
+            task: Optional task text injected via task_injection_template when using command.
+
+        Raises:
+            ValueError: If both or neither of command and raw_cmd are provided.
+            Exception: If sandbox startup or agent execution fails.
         """
         if (command is None) == (raw_cmd is None):
             raise ValueError("Exactly one of `command` or `raw_cmd` must be provided")
@@ -304,8 +326,7 @@ class CodeAgent(ABC, Generic[TCommand]):
             cmd_str = raw_cmd
 
         logger.info(
-            "[bold magenta]Launching agent[/bold magenta] · image=[bold]%s:latest[/bold]\n[dim]$ %s[/dim]",
-            self.DOCKERTAG,
+            "[bold magenta]Launching agent[/bold magenta]\n[dim]$ %s[/dim]",
             cmd_str,
         )
 
@@ -325,7 +346,11 @@ class CodeAgent(ABC, Generic[TCommand]):
             raise
 
     def ui_define_command(self) -> TCommand:
-        """Render UI for command configuration."""
+        """Render Streamlit UI to configure a command instance for this agent.
+
+        Returns:
+            Command instance populated from UI inputs and workspace defaults.
+        """
         command_class = self.get_command_class()
         st.markdown(f"# {self.__class__.__name__} Command")
 
@@ -352,12 +377,13 @@ class CodeAgent(ABC, Generic[TCommand]):
         return command
 
     def get_diff(self) -> str:
-        """Return git diff for workspace."""
+        """Return current git diff for the workspace against HEAD."""
         return subprocess.run(
             ["git", "-C", str(self.path_agent_workspace), "diff"], capture_output=True, text=True, check=False
         ).stdout
 
     def run_workspace(self) -> None:
+        """Execute ./run.sh in the workspace with a clean environment."""
         try:
             env = os.environ.copy()
             env.pop("VIRTUAL_ENV", None)

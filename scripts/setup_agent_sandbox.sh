@@ -1,4 +1,25 @@
 #!/bin/bash
+# Configure a rootless Docker + gVisor sandbox on Debian/Ubuntu hosts.
+#
+# Behavior:
+# - Installs required system packages via apt.
+# - Configures /etc/subuid and /etc/subgid for the current user.
+# - Downloads and verifies gVisor runsc, installs to /usr/local/bin.
+# - Installs Docker CE with rootless extras if missing.
+# - Runs dockerd-rootless-setuptool.sh and configures DOCKER_HOST/PATH.
+# - Writes ~/.config/docker/daemon.json to register runsc with --ignore-cgroups.
+# - Restarts the user-level docker service and verifies rootless + runsc.
+#
+# Assumptions:
+# - Running on a modern Debian/Ubuntu system with sudo access.
+# - User shell is bash or zsh; PATH/DOCKER_HOST are persisted in the shell rc file.
+# - Host and container architectures must match (amd64/x86_64 or arm64/aarch64).
+#
+# Side effects:
+# - Modifies /etc/subuid and /etc/subgid.
+# - Installs or removes Docker-related packages.
+# - Enables systemd user lingering for the current user.
+# - Creates or overwrites ~/.config/docker/daemon.json.
 
 # Exit immediately if a command exits with a non-zero status
 set -e

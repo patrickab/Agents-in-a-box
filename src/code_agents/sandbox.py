@@ -1,52 +1,26 @@
 """
-Security Architecture - Defense in Depth
+Security Architecture: Defense in Depth
 
-1. Zero-Trust Execution Policy
-    - Assume Breach Principle:
-        All agent code treated as potentially malicious.
+* Zero-Trust Policy:
+    - Assume Breach principle -> Treat all agent code as potentially malicious.
 
-2. Kernel-Level Isolation (gVisor)
-    - Sandboxed System Calls:
-        'runsc' runtime provides dedicated guest kernel for container.
-        Acts as syscall firewall between container and host.
+* Kernel Isolation:
+    - gVisor (runsc) -> Acts as syscall firewall. Automatically rejects all not explicitly allowed syscalls.
 
-3. Hardened User Identity & Capability Stripping
-    - Container Root with Namespace Isolation:
-        Container runs as UID 0 for workspace file modification.
-        Rootless Docker maps container root → unprivileged host user (100000+).
-        Agent can modify workspace without permission conflicts.
+* Rootless Architecture:
+    - Container Root maps to unprivileged host user -> Container breakouts land as unprivileged user.
 
-    - Complete Capability Dropping (--cap-drop=ALL):
-        Container stripped of all Linux kernel capabilities by default.
+* Capability Hardening:
+    - `--cap-drop=ALL` + `--security-opt no-new-privileges` -> Eliminates attack surface / blocks escalation.
 
-    - Privilege Escalation Prevention (--security-opt no-new-privileges):
-        Blocks runtime privilege escalation attacks.
+* Resource Quotas:
+    - Hard limits (4GB RAM, 2 CPUs, 100 PIDs) -> Mitigates DoS / starvation / fork bombs.
 
-4. Rootless Infrastructure Architecture
-    - Unprivileged Daemon:
-        Docker Engine runs without root privileges on host.
-    - Identity Mapping:
-        Container UID 0 → Host UID 100000+ (unprivileged range).
-        Container breakout lands as unprivileged host user.
+* Ephemeral Lifecycle:
+    - Auto-destruction (`--rm`) -> Ensures zero residual state / data persistence.
 
-5. Resource Isolation & DoS Prevention
-    - Memory Limits:
-        Prevents memory exhaustion attacks (default: 4GB).
-    - CPU Limits:
-        Throttles CPU usage to prevent resource starvation (default: 2 cores).
-    - Process Limits:
-        Blocks fork bombs (default: 100 PIDs max).
-
-6. Ephemeral Lifecycle Management
-    - Destruction on Completion:
-        Containers automatically removed after task execution (--rm).
-        No persistent container state or residual data.
-
-7. Network Perimeter Control
-    - Traffic Segregation:
-        Isolated bridge network restricts lateral movement.
-    - Host Communication:
-        Secure loopback alias (10.200.200.1) for controlled host access.
+* Network Perimeter:
+    - Isolated bridge + Loopback alias (10.200.200.1) -> Restricts lateral movement / controls host access.
 """
 
 import os

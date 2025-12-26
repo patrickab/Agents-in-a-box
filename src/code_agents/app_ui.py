@@ -87,11 +87,7 @@ def sync_to_home(workspace: Path, repo_url: str) -> tuple[int, Path]:
 
 
 def commit_to_home(workspace: Path, repo_url: str, message: str) -> tuple[bool, str]:
-    """
-    Sync changed files to the user's home repo and commit them.
-
-    Returns (success, message).
-    """
+    """Sync changed files to the user's home repo and commit them."""
     copied, target_root = sync_to_home(workspace=workspace, repo_url=repo_url)
     if copied == 0:
         return False, "No changed files to sync; nothing to commit."
