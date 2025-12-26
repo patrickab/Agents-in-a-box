@@ -42,11 +42,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if not args.command:
         # `<cli-app> <code-agent>` -> use Pydantic defaults of the command class
-        print(f"Running default command: {command.executable} {' '.join(command.construct_args())}")
         agent.run(command=command)
     else:
         # `<cli-app> <code-agent> <custom args>` -> use raw command string
-        raw_cmd = " ".join([command.executable, *args.command])
+        raw_cmd = " ".join([command.executable, *args.command, *DEFAULT_ARGS_AIDER]) # noqa
         agent.run(raw_cmd=raw_cmd)
 
 
