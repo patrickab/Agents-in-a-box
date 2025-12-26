@@ -69,7 +69,6 @@ class AgentCommand(BaseModel, ABC):
         """Convert snake_case string to kebab-case."""
         return s.replace("_", "-")
 
-    @classmethod
     def construct_args(self) -> list[str]:
         """Build CLI argument list from this command instance.
 
