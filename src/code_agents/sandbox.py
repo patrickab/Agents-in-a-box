@@ -18,6 +18,9 @@ Security Architecture: Defense in Depth
 
 * Ephemeral Lifecycle:
     - Auto-destruction (`--rm`) -> Ensures zero residual state / data persistence.
+                                -> Only mounted git repository remains for inspection.
+                                -> Minimizes persistence and attack surface.
+
 
 * Network Perimeter:
     - Isolated bridge + Loopback alias (10.200.200.1) -> Restricts lateral movement / controls host access.
@@ -144,7 +147,4 @@ class DockerSandbox:
         try:
             subprocess.run(cmd, check=True)
         except subprocess.CalledProcessError as e:
-            raise ContainerRuntimeError(
-                f"Container execution failed with exit code {e.returncode}. "
-                f"Command: {' '.join(cmd)}"
-            ) from e
+            raise ContainerRuntimeError(f"Container execution failed with exit code {e.returncode}. Command: {' '.join(cmd)}") from e

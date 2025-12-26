@@ -1,3 +1,18 @@
+"""
+Architecture & Behavior
+
+Agent & Command Abstraction
+    Pydantic-based command models encapsulate tool-specific parameters.
+    UI is dynamically derived from command pydantic fields.
+    Decouples agent configuration from execution engine.
+
+Code Agent Runtime Binding
+    Generic CodeAgent defined through
+        (a) concrete *Command* subclasses
+        (b) DOCKERTAG that identifies runtime environment.
+    Ensures an easily extensible agent ecosystem.
+"""
+
 import logging
 from typing import ClassVar, List, Literal
 

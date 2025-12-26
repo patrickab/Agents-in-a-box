@@ -1,3 +1,19 @@
+"""
+Architecture & Behavior
+
+Agent Command Baseclass
+    Centralized agent invocation contract
+    Dynamic UI form derivation for streamlit configuration
+
+Code Agent Baseclass
+    Prepares dedicated workspaces for agents in ~/agent_workspace/<repo>.
+    Launches agents in isolated Docker sandboxes mounted to workspace.
+    Provides bridge between host and agent processes preserving CLI interaction.
+
+Git-Backed Workspace Management
+    Clones or updates git repositories into sandboxed workspaces.
+"""
+
 from abc import ABC
 import os
 from pathlib import Path
