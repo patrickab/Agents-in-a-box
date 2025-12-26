@@ -1,6 +1,6 @@
 # Agents-in-a-Box
 
-**Secure orchestration layer for autonomous coding agents.** Wraps CLI agents into a heavily restricted, ephemeral, and sandboxed runtime.
+**Secure orchestration layer for autonomous coding agents.** Wraps CLI agents into a heavily restricted, ephemeral, sandboxed runtime.
 
 **Supported Agents:**
 *   [Open Code](https://opencode.ai/)
@@ -31,20 +31,28 @@ While the supported Frameworks ask for permission before visiting a website or m
 ---
 
 ## 🛡️ Security Architecture: **Defense-in-Depth**
-This project mitigates risk by enforcing a **Zero-Trust policy** under assumption of malicious intent.
 
-**1. Kernel & Container Isolation**
-Even in the event of a container breakout, the attacker finds themselves with zero permissions on the host filesystem.
+**1. Runtime Isolation**
 
-*   **[Rootless Docker](https://docs.docker.com/engine/security/rootless/):** Utilizes user namespaces to map the container's `root` user to a non-privileged user on the host.
-*   **[gVisor (runsc)](https://github.com/google/gvisor):** Intercepts system calls in a distinct user-space kernel - rejects syscalls with system-level privileges.
+Inside the container the agent receives an dedicated guest kernel with severly restricted capabilities for root users. But even in the event of a container breakout, the attacker finds themselves with zero permissions on the host filesystem.
 
-**2. Network Perimeter & Logical Air-Gap**
-*   **Egress Control:** Strict firewall rules prevent lateral movement or internal network scanning.
-*   **Secure Bridging to localhost without network exposure**
-    *   Enables secure CPU/GPU inference.
-    *   Assigns static IP `10.200.200.1` to the host loopback (non-routable via Wi-Fi/Eth).
-    *   UFW allows traffic *only* from the Docker subnet (`172.17.0.0/16`) to the alias.
+*   **[gVisor (runsc)](https://github.com/google/gvisor):** Intercepts system calls in a distinct user-space kernel. Rejects system calls with system privileges. Significantly reduces risk for kernel exploits.
+*   **[Rootless Docker](https://docs.docker.com/engine/security/rootless/):** Maps the container's `root` (UID 0) to a non-privileged UID on the host.
+*   **Ephemeral Lifecycle:** All runtime installations are destroyed after execution.
+
+**2. Network Hardening**
+
+Enables secure CPU/GPU local inference. No access to the host LAN or local network peers. Prevents internal network scanning.
+
+*   **Non-Routable Aliasing:** Routes LLM traffic through a static loopback alias (`10.200.200.1`). 
+*   **Interface Isolation:** Air-gaps container traffic from access to the local network.
+*   **Egress Control:** Facilitates deterministic firewalls (UFW/IPTables).
+
+**3. Filesystem Scoping & Persistence Control**
+
+Only git-tracked changes for human inspection remain after execution. Other sections of the OS cannot be modified by the agent.
+
+*   **Bind-Mount Isolation:** The agent is physically scoped to `~/agent_workspace/<repo>`. No visibility into host `$HOME`, SSH keys, or environment secrets.
 
 ```mermaid
 graph TD
@@ -88,9 +96,9 @@ graph TD
 ---
 
 ## 🔌 Extensibility
-Designed as a framework using the **Strategy Pattern**.
-*   **Core Logic:** Abstract `CodeAgent` base class handles lifecycle management.
-*   **Implementation:** New agents require only a class inheritance and a **Pydantic model** for CLI argument validation.
+Designed for ease of extensibility. All core features are implemented in a abstract base class.
+- New agents require only class inheritance and a **Pydantic model** for CLI argument validation.
+- UI form is dynamically generated from the **Pydantic model**.
 
 ---
 
