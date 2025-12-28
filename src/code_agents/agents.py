@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_ARCHITECT_AIDER = "openai/gpt-5.1"
 DEFAULT_EDITOR_AIDER = "ollama/devstral-2:123b-cloud"
 DEFAULT_ARGS_AIDER = ["--dark-mode", "--code-theme", "inkpot", "--pretty"]
-
+AVAILABLE_MODELS = MODELS_GEMINI + MODELS_OLLAMA + MODELS_OPENAI + MODELS_VLLM
 
 def model_selector(key: str) -> dict:
     """Create model selection dropdowns in Streamlit sidebar expanders."""
@@ -91,8 +91,8 @@ class AiderCommand(AgentCommand):
     task_injection_template: ClassVar[List[str]] = ["--message", "{task}"]
 
     # Variables
-    model: str = Field(default=DEFAULT_ARCHITECT_AIDER, description="Architect LLM identifier")
-    editor_model: str = Field(default=DEFAULT_EDITOR_AIDER, description="Editor LLM identifier")
+    model: Literal[*AVAILABLE_MODELS] = Field(default=DEFAULT_ARCHITECT_AIDER, description="Architect LLM identifier") # type: ignore
+    editor_model: Literal[*AVAILABLE_MODELS] = Field(default=DEFAULT_EDITOR_AIDER, description="Editor LLM identifier") # type: ignore
     reasoning_effort: Literal["low", "medium", "high"] = Field(default="high", description="Reasoning effort")
     edit_format: Literal["diff", "whole", "udiff"] = Field(default="diff", description="Edit format")
     map_tokens: Literal[1024, 2048, 4096, 8192] = Field(default=1024, description="Context map tokens")
