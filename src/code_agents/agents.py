@@ -71,6 +71,18 @@ def model_selector(key: str) -> dict:
     )
 
 
+class OpenCodeCommand(AgentCommand):
+    """OpenCode-specific command definition."""
+
+    executable: str = "opencode"
+
+
+class OpenCode(CodeAgent[OpenCodeCommand]):
+    """OpenCode Code Agent."""
+
+    DOCKERTAG = DOCKERTAG_OPENCODE
+
+
 class AiderCommand(AgentCommand):
     """Aider-specific command definition."""
 
@@ -131,21 +143,6 @@ class Aider(CodeAgent[AiderCommand]):
                 st.code(f"{cmd.executable} {formatted_args}", language="bash")
 
         return cmd
-
-
-class OpenCodeCommand(AgentCommand):
-    """OpenCode-specific command definition."""
-
-    executable: str = "opencode"
-    edit_format: Literal["diff", "whole", "udiff"] = Field(default="diff", description="Edit format")
-    map_tokens: Literal[1024, 2048, 4096, 8192] = Field(default=1024, description="Context map tokens")
-    stream: bool = Field(default=False, description="Enable streaming output")
-
-
-class OpenCode(CodeAgent[OpenCodeCommand]):
-    """OpenCode Code Agent."""
-
-    DOCKERTAG = DOCKERTAG_OPENCODE
 
 
 class GeminiCommand(AgentCommand):
