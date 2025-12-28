@@ -44,6 +44,7 @@ ENV_VARS = {
 
 logger = get_logger()
 
+
 class AgentCommand(BaseModel, ABC):
     """Base command model for invoking external agent CLIs.
 
@@ -144,7 +145,9 @@ class AgentCommand(BaseModel, ABC):
         # Default to text input for strings and other types
         return st.text_input(desc, value=default or "", key=key)
 
+
 TCommand = TypeVar("TCommand", bound=AgentCommand)
+
 
 class CodeAgent(ABC, Generic[TCommand]):
     """Base class for code agents executed inside a Docker sandbox.
@@ -184,10 +187,7 @@ class CodeAgent(ABC, Generic[TCommand]):
             self.branch = branch
             self.path_agent_workspace = self._initialize_workspace()
             logger.info(
-                "[bold cyan]Repository cloned & initialized ready[/bold cyan] · repo=[bold]%s[/bold] branch=[bold]%s[/bold] path=[bold]%s[/bold]",  # noqa
-                self.repo_url,
-                self.branch,
-                self.path_agent_workspace,
+                "[bold cyan]Repository cloned & initialized",
             )
         else:
             # CLI initialization
@@ -207,19 +207,12 @@ class CodeAgent(ABC, Generic[TCommand]):
         workspace = Path(PATH_SANDBOX) / repo_name
         workspace.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(
-            "[bold magenta]Preparing workspace[/bold magenta] · repo=[bold]%s[/bold] dir=[bold]%s[/bold]",
-            self.repo_url,
-            workspace,
-        )
+        logger.info(f"[bold magenta]Preparing workspace[/bold magenta] · repo=[bold]{self.repo_url}[/bold]")
 
         self._git_checkout(workspace)
         self._install_dependencies(workspace)
 
-        logger.info(
-            "[green]Workspace prepared[/green] · dir=[bold]%s[/bold]",
-            workspace,
-        )
+        logger.info(f"[green]Workspace prepared[/green] · dir=[bold]{workspace}[/bold]")
         return workspace
 
     def _git_checkout(self, workspace: Path) -> None:
@@ -234,26 +227,18 @@ class CodeAgent(ABC, Generic[TCommand]):
         """
         try:
             if (workspace / ".git").exists():
-                logger.info(
-                    "[yellow]Updating existing repo[/yellow] · path=[bold]%s[/bold]",
-                    workspace,
-                )
+                logger.info("[yellow]Updating existing repo[/yellow]")
                 repo = Repo(workspace)
                 repo.git.reset("--hard")
                 repo.remotes.origin.pull()
             else:
-                logger.info(
-                    "[yellow]Cloning repo[/yellow] · url=[bold]%s[/bold] into [bold]%s[/bold]",
-                    self.repo_url,
-                    workspace,
-                )
+                logger.info("[yellow]Cloning repo[/yellow]")
                 repo = Repo.clone_from(self.repo_url, workspace)
 
             # Checkout logic
             if self.branch in repo.heads:
                 logger.info(
-                    "Checking out existing branch [bold]%s[/bold]",
-                    self.branch,
+                    f"Checking out existing branch [bold]{self.branch}[/bold]",
                 )
                 repo.heads[self.branch].checkout()
             else:
@@ -264,9 +249,7 @@ class CodeAgent(ABC, Generic[TCommand]):
                     default_branch = "main"
 
                 logger.info(
-                    "Creating branch [bold]%s[/bold] from [bold]%s[/bold]",
-                    self.branch,
-                    default_branch,
+                    f"Creating branch [bold]{self.branch}[/bold] from [bold]{default_branch}[/bold]",
                 )
                 repo.git.checkout("-b", self.branch, f"origin/{default_branch}")
 
@@ -275,11 +258,13 @@ class CodeAgent(ABC, Generic[TCommand]):
                 "[bold red]Git operation failed[/bold red] · %s",
                 str(e),
             )
-            st.error(f"Git operation failed: {e}")
             raise
 
     def _install_dependencies(self, workspace: Path) -> None:
-        """Best-effort Python dependency installation using uv."""
+        """
+        Assumes existing installation of uv.
+        Cloned repositories are assumed to be trustworthy.
+        """
         cmd = None
         if (workspace / "requirements.txt").exists():
             cmd = ["uv", "pip", "install", "-r", "requirements.txt"]
@@ -292,7 +277,7 @@ class CodeAgent(ABC, Generic[TCommand]):
             try:
                 subprocess.run(cmd, cwd=workspace, check=False, capture_output=True)
             except FileNotFoundError:
-                logger.warning("[bold yellow]Dependency install skipped[/bold yellow] · `uv` not found on PATH")
+                logger.warning("[bold yellow]Dependency install skipped[/bold yellow]. Consider installing 'uv'.")
 
     def get_command_class(self) -> Type[TCommand]:
         """Resolve the concrete AgentCommand subclass from the generic parameter.
@@ -337,8 +322,7 @@ class CodeAgent(ABC, Generic[TCommand]):
             cmd_str = raw_cmd
 
         logger.info(
-            "[bold magenta]Launching agent[/bold magenta]\n[dim]$ %s[/dim]",
-            cmd_str,
+            f"[bold magenta]Launching agent[/bold magenta]\n[dim]$ {cmd_str}[/dim]",
         )
 
         sandbox = DockerSandbox(dockerimage_name=f"{self.DOCKERTAG}:latest")
@@ -350,10 +334,8 @@ class CodeAgent(ABC, Generic[TCommand]):
             )
         except Exception as exc:
             logger.error(
-                "[bold red]Agent run failed[/bold red] · %s",
-                str(exc),
+                f"[bold red]Agent run failed[/bold red] · {exc}",
             )
-            st.error(f"Failed to run agent in sandbox: {exc}")
             raise
 
     def ui_define_command(self) -> TCommand:
@@ -399,11 +381,6 @@ class CodeAgent(ABC, Generic[TCommand]):
             env = os.environ.copy()
             env.pop("VIRTUAL_ENV", None)
 
-            logger.info(
-                "[bold magenta]Running workspace script[/bold magenta] · path=[bold]%s[/bold]\n[dim]$ ./run.sh[/dim]",
-                self.path_agent_workspace,
-            )
-
             subprocess.run(
                 ["./run.sh"],
                 cwd=self.path_agent_workspace,
@@ -411,8 +388,6 @@ class CodeAgent(ABC, Generic[TCommand]):
             )
         except Exception as exc:
             logger.error(
-                "[bold red]Workspace script failed[/bold red] · %s",
-                str(exc),
+                f"[bold red]Workspace script failed[/bold red] · {exc}",
             )
-            st.error(f"Failed to run workspace script: {exc}")
             raise
