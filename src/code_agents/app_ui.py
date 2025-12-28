@@ -194,7 +194,7 @@ def agent_controls(controller: AgentController) -> None:
         st.markdown("---")
 
         st.markdown("# General Control")
-        with st.expander("", expanded=True):
+        with st.expander("", expanded=False):
             st.session_state.system_prompt = st.selectbox(
                 "System prompt",
                 list(AVAILABLE_PROMPTS.keys()),
