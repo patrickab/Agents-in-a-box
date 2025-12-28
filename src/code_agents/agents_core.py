@@ -44,7 +44,6 @@ ENV_VARS = {
 
 logger = get_logger()
 
-
 class AgentCommand(BaseModel, ABC):
     """Base command model for invoking external agent CLIs.
 
@@ -117,38 +116,35 @@ class AgentCommand(BaseModel, ABC):
         Returns:
             Value captured from the rendered widget.
         """
-        origin = get_origin(t)
-        args = get_args(t)
-
+        # Handle boolean fields
         if t is bool:
             return st.toggle(desc, value=default or False, key=key)
 
+        # Handle Literal types (enums)
+        origin = get_origin(t)
         if origin is Literal:
-            options = list(args)
+            options = list(get_args(t))
             idx = options.index(default) if default in options else 0
             return st.selectbox(desc, options=options, index=idx, key=key)
 
-        if origin in (list, list):
-            inner = args[0] if args else type(None)
-            if get_origin(inner) is Literal:
-                options = list(get_args(inner))
+        # Handle list of Literals (multiselect)
+        if origin is list:
+            args = get_args(t)
+            if args and get_origin(args[0]) is Literal:
+                options = list(get_args(args[0]))
                 return st.multiselect(desc, options=options, default=default or [], key=key)
 
-            text_val = ", ".join(default) if isinstance(default, list) else ""
-            res = st.text_input(desc, value=text_val, key=key)
-            return [x.strip() for x in res.split(",") if x.strip()]
-
+        # Handle numeric types
         if t in (int, float):
             is_int = t is int
             val = default if default is not None else (0 if is_int else 0.0)
             step = 1 if is_int else 0.1
             return st.number_input(desc, value=val, step=step, key=key)
 
+        # Default to text input for strings and other types
         return st.text_input(desc, value=default or "", key=key)
 
-
 TCommand = TypeVar("TCommand", bound=AgentCommand)
-
 
 class CodeAgent(ABC, Generic[TCommand]):
     """Base class for code agents executed inside a Docker sandbox.
