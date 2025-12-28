@@ -187,13 +187,13 @@ class CodeAgent(ABC, Generic[TCommand]):
             self.branch = branch
             self.path_agent_workspace = self._initialize_workspace()
             logger.info(
-                "[bold cyan]Repository cloned & initialized",
+                "[bold green]Repository cloned & initialized",
             )
         else:
             # CLI initialization
             self.path_agent_workspace = Path.cwd()
             logger.info(
-                "[bold cyan]Workspace ready (CLI)[/bold cyan] · path=[bold]%s[/bold]",
+                "[bold green]Workspace ready (CLI)[/bold green] · path=[bold magenta]%s[/bold magenta]",
                 self.path_agent_workspace,
             )
 
@@ -207,12 +207,12 @@ class CodeAgent(ABC, Generic[TCommand]):
         workspace = Path(PATH_SANDBOX) / repo_name
         workspace.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"[bold magenta]Preparing workspace[/bold magenta] · repo=[bold]{self.repo_url}[/bold]")
+        logger.info(f"[bold magenta]Preparing workspace[/bold magenta] · repo=[bold magenta]{self.repo_url}[/bold magenta]")
 
         self._git_checkout(workspace)
         self._install_dependencies(workspace)
 
-        logger.info(f"[green]Workspace prepared[/green] · dir=[bold]{workspace}[/bold]")
+        logger.info(f"[bold magenta]Workspace prepared[/bold magenta] · dir=[bold magenta]{workspace}[/bold magenta]")
         return workspace
 
     def _git_checkout(self, workspace: Path) -> None:
@@ -227,18 +227,18 @@ class CodeAgent(ABC, Generic[TCommand]):
         """
         try:
             if (workspace / ".git").exists():
-                logger.info("[yellow]Updating existing repo[/yellow]")
+                logger.info("...updating existing repo")
                 repo = Repo(workspace)
                 repo.git.reset("--hard")
                 repo.remotes.origin.pull()
             else:
-                logger.info("[yellow]Cloning repo[/yellow]")
+                logger.info("...cloning repo")
                 repo = Repo.clone_from(self.repo_url, workspace)
 
             # Checkout logic
             if self.branch in repo.heads:
                 logger.info(
-                    f"Checking out existing branch [bold]{self.branch}[/bold]",
+                    "...checking out existing branch",
                 )
                 repo.heads[self.branch].checkout()
             else:
@@ -268,10 +268,10 @@ class CodeAgent(ABC, Generic[TCommand]):
         cmd = None
         if (workspace / "requirements.txt").exists():
             cmd = ["uv", "pip", "install", "-r", "requirements.txt"]
-            logger.info("[blue]Installing dependencies[/blue] · file=[bold]requirements.txt[/bold]")
-        elif (workspace / "pyproject.toml").exists():
+            logger.info("...installing dependencies")
+        if (workspace / "pyproject.toml").exists():
             cmd = ["uv", "pip", "install", "-e", "."]
-            logger.info("[blue]Installing dependencies[/blue] · file=[bold]pyproject.toml[/bold]")
+            logger.info("...installing dependencies")
 
         if cmd:
             try:
