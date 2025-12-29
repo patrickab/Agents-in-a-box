@@ -110,14 +110,25 @@ Designed for ease of extensibility. All core features are implemented in a abstr
 python src/docker/dockerimage-bakery.py # Compile immutable agent images
 ```
 
-**2. Network Bridge (Optional for Local Inference)**
+**2. Define Secure Loopback IP**
 ```bash
-# Create non-routable alias & allow Docker subnet access
-sudo ip addr add 10.200.200.1/32 dev lo
-sudo ufw allow from 172.17.0.0/16 to 10.200.200.1 port 11434 proto tcp
+# example value
+export SECURE_LOOPBACK_IP="10.200.200.1"
 ```
 
-**3. Run Orchestrator**
+**3a. Run Orchestrator (UI)**
 ```bash
 streamlit run src/app.py
+```
+
+**3b. Run Orchestrator (CLI)**
+```
+# install package systemwide
+pip install -e .
+
+# use your favorite CLI agent with defaults
+agent-sandbox aider
+
+# use your favorite CLI agent with custom parameters
+agent-sandbox aider --model ollama/deepseek-v3.1:671b-cloud --editor-model ollama/devstral-2:123b-cloud --reasoning-effort high
 ```
