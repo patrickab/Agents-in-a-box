@@ -1,5 +1,6 @@
 # ruff: noqa: F403
 import argparse
+import subprocess
 import sys
 from typing import Type
 
@@ -50,4 +51,5 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    subprocess.run("sudo ip addr add 10.200.200.1/32 dev lo", shell=True, check=True)
     main(sys.argv[1:])

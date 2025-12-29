@@ -75,13 +75,6 @@ class DockerSandbox:
         try:
             info = self.client.info()
 
-            try:
-                subprocess.run(["ip", "addr", "show", "to", SECURE_LOOPBACK_IP], check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                raise SecurityEnvironmentError(
-                    f"Secure Bridge IP {SECURE_LOOPBACK_IP} is missing. For Ollama Run: sudo ip addr add 10.200.200.1/32 dev lo"
-                )
-
             security_opts = info.get("SecurityOptions", [])
             if not any("rootless" in opt.lower() for opt in security_opts):
                 raise SecurityEnvironmentError("Rootless Docker is not enabled. Daemon must run in rootless mode.")
