@@ -1,5 +1,6 @@
 # ruff: noqa: F403
 import argparse
+import os
 import subprocess
 import sys
 from typing import Type
@@ -39,17 +40,21 @@ def main(argv: list[str] | None = None) -> None:
 
     agent: CodeAgent = Agent()
     Command: Type[AgentCommand] = agent.get_command_class()
-    command = Command()
 
     if not args.command:
         # `<cli-app> <code-agent>` -> use Pydantic defaults of the command class
-        agent.run(command=command)
+        agent.run(command=Command())
     else:
         # `<cli-app> <code-agent> <custom args>` -> use raw command string
-        raw_cmd = " ".join([command.executable, *args.command, *DEFAULT_ARGS_AIDER]) # noqa
+        raw_cmd = " ".join([Command().executable, *args.command, *DEFAULT_ARGS_AIDER])  # noqa
         agent.run(raw_cmd=raw_cmd)
 
 
 if __name__ == "__main__":
-    subprocess.run("sudo ip addr add 10.200.200.1/32 dev lo", shell=True, check=True)
+    try:
+        SECURE_LOOPBACK_IP = os.getenv("SECURE_LOOPBACK_IP")
+    except KeyError:
+        raise KeyError("Environment variable SECURE_LOOPBACK_IP is not set. (use 10.200.200.1 for secure private network isolation)")
+
+    subprocess.run(f"sudo ip addr add {SECURE_LOOPBACK_IP}/32 dev lo", shell=True, check=True)
     main(sys.argv[1:])

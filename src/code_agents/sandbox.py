@@ -1,9 +1,6 @@
 """
 Security Architecture: Defense in Depth
 
-* Zero-Trust Policy:
-    - Assume Breach principle -> Treat all agent code as potentially malicious.
-
 * Kernel Isolation:
     - gVisor (runsc) -> Acts as syscall firewall. Automatically rejects all not explicitly allowed syscalls.
 
@@ -20,7 +17,6 @@ Security Architecture: Defense in Depth
     - Auto-destruction (`--rm`) -> Ensures zero residual state / data persistence.
                                 -> Only mounted git repository remains for inspection.
                                 -> Minimizes persistence and attack surface.
-
 
 * Network Perimeter:
     - Isolated bridge + Loopback alias (10.200.200.1) -> Restricts lateral movement / controls host access.
@@ -45,11 +41,13 @@ class ContainerRuntimeError(Exception):
 
 # === Define secure loopback IP for host-container communication
 # === Rootless Docker disables host.docker.internal by default
-# Implements a Zero Trust bridge for Rootless Docker via a static loopback alias,
+# Implements a secure bridge for Rootless Docker via a static loopback alias,
 # Ensures traffic is air-gapped from physical interfaces to prevent accidental exposure.
 # This stable target enables deterministic firewalling independent of host network changes.
-# Setup: `sudo ip addr add 10.200.200.1/32 dev lo`
-SECURE_LOOPBACK_IP = "10.200.200.1"
+try:
+    SECURE_LOOPBACK_IP = os.getenv("SECURE_LOOPBACK_IP")
+except KeyError:
+    raise KeyError("Environment variable SECURE_LOOPBACK_IP is not set. (use 10.200.200.1 for secure private network isolation)")
 
 
 class DockerSandbox:
