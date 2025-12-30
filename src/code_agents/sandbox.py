@@ -49,6 +49,11 @@ try:
 except KeyError:
     raise KeyError("Environment variable SECURE_LOOPBACK_IP is not set. (use 10.200.200.1 for secure private network isolation)")
 
+DOCKER_ENV_VARS = {
+    "DOCKER_HOST": f"unix:///run/user/{os.getuid()}/docker.sock",
+    "PATH": f"{os.path.expanduser('~/bin')}:{os.environ.get('PATH', '')}",
+}
+
 
 class DockerSandbox:
     """
@@ -64,7 +69,13 @@ class DockerSandbox:
 
     def __init__(self, dockerimage_name: str) -> None:
         self.logger = get_logger()
-        self.client = docker.from_env()
+
+        # Explicitly connect to Rootless Socket using the calculated path
+        try:
+            self.client = docker.DockerClient(base_url=DOCKER_ENV_VARS["DOCKER_HOST"])
+        except docker.errors.DockerException as e:
+            raise SecurityEnvironmentError(f"Failed to connect to Rootless Docker: {e}")
+
         self.dockerimage_name = dockerimage_name
         self._verify_environment()
 
@@ -127,6 +138,8 @@ class DockerSandbox:
         ]
 
         # Add environment variables to the command
+        for key, value in DOCKER_ENV_VARS.items():
+            cmd.extend(["-e", f"{key}={value}"])
         if env_vars:
             for key, value in env_vars.items():
                 cmd.extend(["-e", f"{key}={value}"])
