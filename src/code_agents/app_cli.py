@@ -5,7 +5,7 @@ import subprocess
 import sys
 from typing import Type
 
-from code_agents.agents import *
+from code_agents.agents import *  # noqa
 from code_agents.agents_core import AgentCommand, CodeAgent
 
 # Dynamic discovery of subclasses

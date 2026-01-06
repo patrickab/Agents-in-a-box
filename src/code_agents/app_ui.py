@@ -25,6 +25,7 @@ agent_subclasses = CodeAgent.__subclasses__()
 agent_dict = {cls.__name__: cls for cls in agent_subclasses}
 agent_names = list(agent_dict.keys())
 
+
 class AgentController:
     """Business logic controller for agent operations."""
 
@@ -129,7 +130,9 @@ class AgentController:
         """Execute workspace test script."""
         agent.run_workspace()
 
+
 # ---------------- Streamlit Application ---------------- #
+
 
 def agent_controls(controller: AgentController) -> None:
     """Streamlit sidebar for agent controls."""
@@ -163,11 +166,7 @@ def agent_controls(controller: AgentController) -> None:
 
         def init_agent() -> None:
             """Initialize and store agent in session state."""
-            selected_agent = controller.initialize_agent(
-                agent_type=selected_agent_name,
-                repo_url=repo_url,
-                branch=branch
-            )
+            selected_agent = controller.initialize_agent(agent_type=selected_agent_name, repo_url=repo_url, branch=branch)
             st.session_state.selected_agent = selected_agent
 
         if repo_url and branch:
@@ -239,6 +238,7 @@ def agent_controls(controller: AgentController) -> None:
         command: AgentCommand = selected_agent.ui_define_command()
         st.session_state.command = command
 
+
 def chat_interface(controller: AgentController) -> None:
     """Streamlit chat interface for code agents."""
 
@@ -257,10 +257,7 @@ def chat_interface(controller: AgentController) -> None:
             selected_agent: CodeAgent[Any] = st.session_state.selected_agent
 
             controller.execute_agent_task(
-                agent=selected_agent,
-                task=task,
-                system_prompt=st.session_state.system_prompt,
-                command=st.session_state.command
+                agent=selected_agent, task=task, system_prompt=st.session_state.system_prompt, command=st.session_state.command
             )
 
             diff: str = selected_agent.get_diff()
@@ -292,8 +289,10 @@ def chat_interface(controller: AgentController) -> None:
             else:
                 st.info("No changes detected in git diff.")
 
+
 # Initialize outside main to avoid re-initialization
 controller = AgentController(agent_dict=agent_dict, agent_names=agent_names)
+
 
 def main() -> None:
     """Main Streamlit application entrypoint."""
@@ -302,6 +301,7 @@ def main() -> None:
     with st.sidebar:
         agent_controls(controller)
     chat_interface(controller)
+
 
 if __name__ == "__main__":
     main()
