@@ -13,18 +13,16 @@
 
 Supports CPU/GPU local inference by linking the Docker subnet to a static alias.
 
-https://github.com/user-attachments/assets/e57c43c6-4791-4bf8-a877-793d286880f2
-
 ---
 
 ## 🎯 Purpose
 
-Code agents typically run directly on the host machine with full user privileges
+Coding agents typically run directly on the host machine with full user privileges
 
 By default this means:
-*   **Arbitrary Code Generation & Execution**
-*   **Unrestricted Filesystem Access**
-*   **Unrestricted Network Access**
+*   **Arbitrary code generation & execution**
+*   **Nearly unrestricted filesystem access**
+*   **Unrestricted network access**
 
 While the supported Frameworks ask for permission before visiting a website or modifying files, they can technically send any user-accessible (private) data to any publicly accessible domain or download & install arbitrary software in the userspace.
 
