@@ -1,15 +1,22 @@
 [project]
-name = "Agents-in-a-box"
+name = "agent-sandbox"
 version = "0.1.0"
-description = "Standalone secure code agent with Docker sandboxing"
+description = "Rootless-Docker and gVisor-backed runtime for a single profiled sandbox container."
+keywords = ["docker", "gvisor", "omp", "rootless", "sandbox"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "docker>=7.1.0",
-    "gitpython>=3.1.0",
-    "pydantic>=2.0.0",
-    "rich>=13.0.0",
-    "streamlit>=1.51.0",
+    "pyyaml>=6.0.3",
 ]
 
 [build-system]
@@ -17,10 +24,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
-agent-sandbox = "code_agents.app_cli:main" 
+agent-sandbox = "agent_sandbox.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/code_agents"]
+packages = ["src/agent_sandbox"]
+
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -31,18 +39,7 @@ respect-gitignore = true
 line-length = 135
 
 [tool.ruff.lint]
-select = [
-  "E",   # pycodestyle errors
-  "F",   # pyflakes
-  "I",   # isort
-  "B",   # bugbear
-  "C4",  # comprehensions
-  "TCH", # type-checking hygiene
-  "SIM", # simplify
-  "ANN", # type hints
-  "ARG", # unused arguments
-  "RUF"  # Ruff-native rules
-]
+select = ["E", "F", "I", "B", "SIM", "C4"]
 ignore = [
   "RUF100",
   "E402",
@@ -53,5 +50,10 @@ ignore = [
 force-sort-within-sections = true
 section-order = ["standard-library", "third-party", "first-party", "local-folder"]
 
-# Enables Ruff formatter with default options (Black-compatible)
+# Use Ruff's Black-compatible formatter.
 [tool.ruff.format]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

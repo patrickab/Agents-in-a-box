@@ -2,13 +2,14 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug Streamlit App",
+            "name": "Debug agent-sandbox doctor",
             "type": "debugpy",
             "request": "launch",
-            "module": "streamlit",
+            "module": "agent_sandbox.cli",
             "args": [
-                "run",
-                "${workspaceFolder}/src/code_agents/app_ui.py"
+                "doctor",
+                "--profile",
+                "gigachad"
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/src"

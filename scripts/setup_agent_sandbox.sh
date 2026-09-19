@@ -1,174 +1,162 @@
-#!/bin/bash
-# Configure a rootless Docker + gVisor sandbox on Debian/Ubuntu hosts.
-#
-# Behavior:
-# - Installs required system packages via apt.
-# - Configures /etc/subuid and /etc/subgid for the current user.
-# - Downloads and verifies gVisor runsc, installs to /usr/local/bin.
-# - Installs Docker CE with rootless extras if missing.
-# - Runs dockerd-rootless-setuptool.sh.
-# - Writes ~/.config/docker/daemon.json to register runsc with --ignore-cgroups.
-# - Restarts the user-level docker service and verifies rootless + runsc.
-#
-# Constraints:
-# - NO modification of .bashrc, .zshrc, or .profile.
-# - NO global environment variable persistence.
+#!/usr/bin/env bash
+# Install rootless Docker, the latest gVisor runtime, and sandbox prerequisites on Debian or Arch Linux.
+# This script does not remove Docker packages, disable system services, or edit shell startup files.
 
-# Exit immediately if a command exits with a non-zero status
-set -e
+set -euo pipefail
 
-# Colors for output
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+RUNSC_PATH="$HOME/.local/bin/runsc"
+DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+CONFIG_FILE="$HOME/.config/docker/daemon.json"
 
-echo -e "${BLUE}[+] Starting Secure Sandbox Setup (Rootless Docker + gVisor)...${NC}"
-
-# ---------------------------------------------------------
-# 1. System Preparation & Dependencies
-# ---------------------------------------------------------
-echo -e "${BLUE}[1/5] Installing system dependencies...${NC}"
-sudo apt-get update -qq
-sudo apt-get install -y -qq \
-    uidmap \
-    dbus-user-session \
-    fuse-overlayfs \
-    slirp4netns \
-    jq \
-    curl \
-    wget \
-    iptables \
-    git \
-    ca-certificates \
-    gnupg \
-    lsb-release
-
-# ---------------------------------------------------------
-# 2. Configure Subordinate UIDs/GIDs
-# ---------------------------------------------------------
-echo -e "${BLUE}[2/5] Configuring Subordinate UIDs/GIDs...${NC}"
-
-if ! grep -q "^$USER:" /etc/subuid; then
-    echo -e "${YELLOW}    Adding subuid entry for $USER...${NC}"
-    echo "$USER:100000:65536" | sudo tee -a /etc/subuid
-else
-    echo -e "${GREEN}    Subuid entry exists.${NC}"
-fi
-
-if ! grep -q "^$USER:" /etc/subgid; then
-    echo -e "${YELLOW}    Adding subgid entry for $USER...${NC}"
-    echo "$USER:100000:65536" | sudo tee -a /etc/subgid
-else
-    echo -e "${GREEN}    Subgid entry exists.${NC}"
-fi
-
-# ---------------------------------------------------------
-# 3. Install gVisor (runsc)
-# ---------------------------------------------------------
-echo -e "${BLUE}[3/5] Installing gVisor (runsc)...${NC}"
-
-ARCH=$(dpkg --print-architecture)
-case "$ARCH" in
-    amd64) GVISOR_ARCH="x86_64" ;;
-    arm64) GVISOR_ARCH="aarch64" ;;
-    *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
-esac
-
-URL="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
-
-wget -q "${URL}/runsc" -O runsc
-wget -q "${URL}/runsc.sha512" -O runsc.sha512
-
-EXPECTED_HASH=$(awk '{print $1}' runsc.sha512)
-echo "$EXPECTED_HASH  runsc" | sha512sum -c - --status
-
-if [ $? -eq 0 ]; then
-    chmod a+x runsc
-    sudo mv runsc /usr/local/bin/runsc
-    rm runsc.sha512
-    echo -e "${GREEN}    gVisor installed to /usr/local/bin/runsc${NC}"
-else
-    echo -e "${RED}    Checksum failed! Exiting.${NC}"
-    rm runsc runsc.sha512
+fail() {
+    printf 'ERROR: %s\n' "$*" >&2
     exit 1
-fi
+}
 
-# ---------------------------------------------------------
-# 4. Install Rootless Docker
-# ---------------------------------------------------------
-echo -e "${BLUE}[4/5] Installing Rootless Docker...${NC}"
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "Required command '$1' is not installed."
+}
 
-# Remove conflicting legacy packages
-for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-    sudo apt-get remove -y $pkg >/dev/null 2>&1 || true
-done
+has_subordinate_range() {
+    awk -F: -v user="$USER" '$1 == user && $3 >= 65536 { found = 1 } END { exit !found }' "$1"
+}
 
-# Disable system-wide docker
-if systemctl is-active --quiet docker; then
-    sudo systemctl disable --now docker.service docker.socket || true
-fi
+ensure_subordinate_ids() {
+    require_command sudo
+    if ! has_subordinate_range /etc/subuid; then
+        sudo usermod --add-subuids 100000-165535 "$USER"
+    fi
+    if ! has_subordinate_range /etc/subgid; then
+        sudo usermod --add-subgids 100000-165535 "$USER"
+    fi
+}
 
-# Install Official Docker CE + Rootless Extras
-if ! command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
-    echo -e "${YELLOW}    Installing official Docker packages...${NC}"
-    curl -fsSL https://get.docker.com | sh
-    sudo apt-get install -y -qq docker-ce-rootless-extras
-fi
+install_rootless_docker_packages() {
+    [[ -r /etc/os-release ]] || fail "Cannot identify the Linux distribution because /etc/os-release is unavailable."
+    . /etc/os-release
 
-# Enable Linger
-sudo loginctl enable-linger "$USER"
+    if [[ "$ID" == debian || "$ID" == ubuntu ]]; then
+        require_command sudo
+        require_command apt-get
+        sudo apt-get update
+        sudo apt-get install -y docker-ce docker-ce-rootless-extras uidmap
+    elif [[ "$ID" == arch ]]; then
+        if command -v yay >/dev/null 2>&1; then
+            aur_helper=yay
+        elif command -v paru >/dev/null 2>&1; then
+            aur_helper=paru
+        else
+            fail "Arch Linux requires the docker-rootless-extras AUR package. Install yay or paru, then rerun this script."
+        fi
+        "$aur_helper" -S --needed --noconfirm docker docker-rootless-extras slirp4netns
+    else
+        fail "Unsupported Linux distribution '$ID'. Supported distributions are Debian, Ubuntu, and Arch Linux."
+    fi
+}
 
-# Run the setup tool
-echo -e "    Running Rootless Setup Tool..."
-dockerd-rootless-setuptool.sh install --force
+ensure_rootless_docker() {
+    if [[ -S "${DOCKER_HOST#unix://}" ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker info --format '{{json .SecurityOptions}}' | grep -qi rootless; then
+        printf '%s\n' 'Using the existing rootless Docker daemon.'
+        return
+    fi
 
-# ---------------------------------------------------------
-# 5. Configure Docker Daemon for gVisor
-# ---------------------------------------------------------
-echo -e "${BLUE}[5/5] Configuring Docker Daemon to use gVisor...${NC}"
+    printf '%s\n' 'Installing rootless Docker prerequisites...'
+    install_rootless_docker_packages
+    ensure_subordinate_ids
 
-CONFIG_DIR="$HOME/.config/docker"
-CONFIG_FILE="$CONFIG_DIR/daemon.json"
+    rootless_setup_tool="$(command -v dockerd-rootless-setuptool.sh || true)"
+    if [[ -z "$rootless_setup_tool" && -x /usr/share/docker.io/contrib/dockerd-rootless-setuptool.sh ]]; then
+        rootless_setup_tool=/usr/share/docker.io/contrib/dockerd-rootless-setuptool.sh
+    fi
+    [[ -n "$rootless_setup_tool" ]] || fail "Docker was installed but its rootless setup tool is unavailable."
 
-mkdir -p "$CONFIG_DIR"
-if [ ! -f "$CONFIG_FILE" ]; then echo '{}' > "$CONFIG_FILE"; fi
+    if systemctl is-active --quiet docker.service; then
+        printf '%s\n' 'A rootful Docker service is active. Leaving it running and installing the rootless daemon alongside it.'
+        "$rootless_setup_tool" install --force
+    else
+        "$rootless_setup_tool" install
+    fi
+    systemctl --user start docker
+}
 
-# Configure runsc with ignore-cgroups
-jq '
-  .runtimes.runsc.path = "/usr/local/bin/runsc" |
-  .runtimes.runsc.runtimeArgs = ["--ignore-cgroups"]
-' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+printf '%s\n' 'Ensuring a rootless Docker daemon is available...'
+ensure_rootless_docker
+require_command docker
+require_command python3
+require_command sha512sum
+export DOCKER_HOST
 
-echo -e "${GREEN}    Daemon configuration updated at $CONFIG_FILE${NC}"
+[[ -S "${DOCKER_HOST#unix://}" ]] || fail "Rootless Docker socket is unavailable at $DOCKER_HOST after installation."
+docker info >/dev/null 2>&1 || fail "Cannot connect to rootless Docker at $DOCKER_HOST after installation."
+docker info --format '{{json .SecurityOptions}}' | grep -qi rootless || fail "Docker at $DOCKER_HOST is not rootless after installation."
 
-# ---------------------------------------------------------
-# 6. Restart & Verify
-# ---------------------------------------------------------
-echo -e "${BLUE}[+] Restarting Docker and Verifying...${NC}"
-
-systemctl --user restart docker
-sleep 5
-
-# Define temporary variables for verification (NOT exported to shell config)
-TEMP_DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
-TEMP_PATH="$HOME/bin:$PATH"
-
-# Verify using explicit environment
-DOCKER_ROOTLESS=$(DOCKER_HOST="$TEMP_DOCKER_HOST" PATH="$TEMP_PATH" docker info -f '{{.SecurityOptions}}' 2>/dev/null | grep "rootless" || echo "")
-DOCKER_RUNTIMES=$(DOCKER_HOST="$TEMP_DOCKER_HOST" PATH="$TEMP_PATH" docker info -f '{{.Runtimes}}' 2>/dev/null | grep "runsc" || echo "")
-
-if [[ -n "$DOCKER_ROOTLESS" && -n "$DOCKER_RUNTIMES" ]]; then
-    echo -e "${GREEN}SUCCESS! Environment is ready.${NC}"
-    echo -e "  - Rootless Mode: ${GREEN}Active${NC}"
-    echo -e "  - gVisor Runtime: ${GREEN}Registered${NC}"
-    echo -e "${YELLOW}NOTE: No changes were made to your .bashrc/.zshrc.${NC}"
-    echo -e "      Your Python sandbox module must inject DOCKER_HOST/PATH manually."
+require_command curl
+if [[ "$(uname -m)" == x86_64 ]]; then
+    GVISOR_ARCH=x86_64
+elif [[ "$(uname -m)" == aarch64 ]]; then
+    GVISOR_ARCH=aarch64
 else
-    echo -e "${RED}WARNING: Verification failed.${NC}"
-    echo "Rootless status (Expected 'rootless'): $DOCKER_ROOTLESS"
-    echo "Runtimes found (Expected 'runsc'): $DOCKER_RUNTIMES"
-    echo "Check 'systemctl --user status docker' for logs."
-    exit 1
+    fail "Unsupported architecture: $(uname -m)."
 fi
+
+temporary_dir="$(mktemp -d)"
+trap 'rm -rf "$temporary_dir"' EXIT
+mkdir -p "$(dirname "$RUNSC_PATH")"
+archive_name=gvisor.tar.zstd
+base_url="https://storage.googleapis.com/gvisor/releases/release/latest/${GVISOR_ARCH}"
+printf 'Installing the latest gVisor release to %s...\n' "$(dirname "$RUNSC_PATH")"
+curl --fail --location --silent --show-error "$base_url/$archive_name" --output "$temporary_dir/$archive_name"
+curl --fail --location --silent --show-error "$base_url/$archive_name.sha512" --output "$temporary_dir/$archive_name.sha512"
+(
+    cd "$temporary_dir"
+    sha512sum --check --status "$archive_name.sha512"
+) || fail "gVisor checksum verification failed."
+tar --extract --zstd --file "$temporary_dir/$archive_name" --directory "$(dirname "$RUNSC_PATH")"
+[[ -x "$RUNSC_PATH" ]] || fail "The gVisor archive did not install an executable runsc at $RUNSC_PATH."
+
+mkdir -p "$(dirname "$CONFIG_FILE")"
+if [[ -f "$CONFIG_FILE" ]]; then
+    backup_file="${CONFIG_FILE}.agent-sandbox.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "$CONFIG_FILE" "$backup_file"
+    printf 'Backed up Docker configuration to %s.\n' "$backup_file"
+fi
+
+python3 - "$CONFIG_FILE" "$RUNSC_PATH" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+config_path, runsc_path = sys.argv[1:]
+if os.path.exists(config_path):
+    with open(config_path, encoding="utf-8") as config_file:
+        config = json.load(config_file)
+else:
+    config = {}
+if not isinstance(config, dict):
+    raise SystemExit(f"Docker configuration must be a JSON object: {config_path}")
+runtimes = config.setdefault("runtimes", {})
+if not isinstance(runtimes, dict):
+    raise SystemExit(f"Docker configuration field 'runtimes' must be an object: {config_path}")
+runtimes["runsc"] = {"path": runsc_path}
+fd, temporary_path = tempfile.mkstemp(dir=os.path.dirname(config_path), prefix="daemon.json.", text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as config_file:
+        json.dump(config, config_file, indent=2)
+        config_file.write("\n")
+    os.replace(temporary_path, config_path)
+finally:
+    if os.path.exists(temporary_path):
+        os.unlink(temporary_path)
+PY
+
+printf '%s\n' 'Restarting the current user Docker service...'
+systemctl --user restart docker || fail "Could not restart the user Docker service. Restart it manually, then rerun this script."
+docker info >/dev/null 2>&1 || fail "Rootless Docker did not become available after restart."
+docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || fail "Docker did not register the runsc runtime."
+
+printf '%s\n' 'Rootless Docker and gVisor runsc are registered.'
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+docker build -t agent-sandbox:trixie -f "$repository_root/docker/Dockerfile" "$repository_root"
+printf '%s\n' 'Built agent-sandbox:trixie.'
+printf '%s\n' 'Run agent-sandbox doctor with a profile to verify rootless cgroup startup and profile prerequisites.'
