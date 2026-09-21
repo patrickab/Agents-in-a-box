@@ -31,16 +31,12 @@ def _runsc_config_failure(detail: str) -> CheckResult:
 
 
 def _check_runsc_cgroup_handling() -> CheckResult:
-    """Ensure rootless runsc configuration does not disable cgroup limits."""
+    """Ensure runsc skips unsupported rootless cgroup setup."""
     config_path = Path(ROOTLESS_DOCKER_DAEMON_CONFIG)
     try:
         config_text = config_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return CheckResult(
-            "runsc-cgroup-handling",
-            True,
-            "no runsc runtimeArgs configured to disable cgroup setup",
-        )
+        return _runsc_config_failure(f"rootless Docker config '{config_path}' is missing")
     except (OSError, UnicodeError) as e:
         return _runsc_config_failure(f"could not read rootless Docker config '{config_path}': {e}")
 
@@ -51,41 +47,22 @@ def _check_runsc_cgroup_handling() -> CheckResult:
 
     if not isinstance(config, dict):
         return _runsc_config_failure(f"rootless Docker config '{config_path}' must be a JSON object")
-
-    if "runtimes" not in config:
-        return CheckResult(
-            "runsc-cgroup-handling",
-            True,
-            "no runsc runtimeArgs configured to disable cgroup setup",
-        )
-    runtimes = config["runtimes"]
+    runtimes = config.get("runtimes")
     if not isinstance(runtimes, dict):
         return _runsc_config_failure(f"rootless Docker config '{config_path}' field 'runtimes' must be an object")
-    if "runsc" not in runtimes:
-        return CheckResult(
-            "runsc-cgroup-handling",
-            True,
-            "no runsc runtimeArgs configured to disable cgroup setup",
-        )
-    runsc = runtimes["runsc"]
+    runsc = runtimes.get("runsc")
     if not isinstance(runsc, dict):
         return _runsc_config_failure(f"rootless Docker config '{config_path}' runtime 'runsc' must be an object")
-    if "runtimeArgs" not in runsc:
-        return CheckResult(
-            "runsc-cgroup-handling",
-            True,
-            "no runsc runtimeArgs configured to disable cgroup setup",
-        )
-    runtime_args = runsc["runtimeArgs"]
+    runtime_args = runsc.get("runtimeArgs")
     if not isinstance(runtime_args, list) or not all(isinstance(argument, str) for argument in runtime_args):
         return _runsc_config_failure(
             f"rootless Docker config '{config_path}' runsc runtimeArgs must be a list of strings"
         )
-    if "--ignore-cgroups" in runtime_args:
+    if "--ignore-cgroups" not in runtime_args:
         return _runsc_config_failure(
-            "runsc runtimeArgs contains '--ignore-cgroups', which disables Docker resource limits"
+            "runsc runtimeArgs must contain '--ignore-cgroups' because rootless gVisor cannot create host cgroups"
         )
-    return CheckResult("runsc-cgroup-handling", True, "runsc runtimeArgs do not disable cgroup setup")
+    return CheckResult("runsc-cgroup-handling", True, "runsc CPU, memory, and PID cgroup limits are disabled")
 
 
 
@@ -145,28 +122,27 @@ def _run_ephemeral(runtime: SandboxRuntime, argv: list[str]) -> bytes:
     return runtime.run_probe(argv)
 
 def _check_runsc_startup(runtime: SandboxRuntime) -> CheckResult:
-    """Verify runsc can create a rootless container with runtime limits enabled."""
+    """Verify runsc can create a rootless container."""
     try:
         _run_ephemeral(runtime, ["true"])
     except docker.errors.DockerException as e:
         detail = str(e)
-        if "Interactive authentication required" in detail:
+        if "interactive authentication" in detail.lower():
             return CheckResult(
                 "runsc-rootless-cgroups",
                 False,
-                "runsc cannot create a rootless systemd cgroup. This is the upstream gVisor "
-                "limitation https://github.com/google/gvisor/issues/11543. "
-                "The '--ignore-cgroups' workaround is intentionally rejected because it disables resource limits",
+                "runsc cannot create a rootless systemd cgroup due to upstream gVisor limitation "
+                "https://github.com/google/gvisor/issues/11543. rerun scripts/setup_agent_sandbox.sh",
             )
         return CheckResult(
             "runsc-rootless-cgroups",
             False,
-            f"rootless runsc container with resource limits failed to start: {e}",
+            f"rootless runsc container failed to start: {e}",
         )
     return CheckResult(
         "runsc-rootless-cgroups",
         True,
-        "rootless runsc container started with cgroup resource limits enabled",
+        "rootless runsc container started",
     )
 
 

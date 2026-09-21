@@ -201,7 +201,7 @@ class TestRunDoctor(unittest.TestCase):
 
         runtime = MagicMock()
         runtime.run_probe.side_effect = docker.errors.DockerException(
-            "OCI runtime create failed: systemd error: Interactive authentication required."
+            "systemd error: Access denied as the requested operation requires interactive authentication."
         )
 
         result = _check_runsc_startup(runtime)
@@ -210,9 +210,9 @@ class TestRunDoctor(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.name, "runsc-rootless-cgroups")
         self.assertIn("https://github.com/google/gvisor/issues/11543", result.detail)
-        self.assertIn("'--ignore-cgroups' workaround is intentionally rejected", result.detail)
+        self.assertIn("rerun scripts/setup_agent_sandbox.sh", result.detail)
 
-    def test_cgroup_check_rejects_stale_ignore_cgroups(self) -> None:
+    def test_cgroup_check_accepts_ignore_cgroups(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "daemon.json"
             config_path.write_text(
@@ -222,15 +222,14 @@ class TestRunDoctor(unittest.TestCase):
             with patch("agent_sandbox.doctor.ROOTLESS_DOCKER_DAEMON_CONFIG", str(config_path)):
                 result = _check_runsc_cgroup_handling()
 
-        self.assertFalse(result.passed)
+        self.assertTrue(result.passed)
         self.assertEqual(result.name, "runsc-cgroup-handling")
-        self.assertIn("--ignore-cgroups", result.detail)
-        self.assertIn("rerun scripts/setup_agent_sandbox.sh", result.detail)
+        self.assertIn("limits are disabled", result.detail)
 
-    def test_cgroup_check_allows_clean_or_missing_runtime_args(self) -> None:
+    def test_cgroup_check_rejects_missing_ignore_cgroups(self) -> None:
         cases = {
-            "clean": {"runtimes": {"runsc": {"runtimeArgs": ["--debug"]}}},
-            "missing": {"runtimes": {"runsc": {"path": "/home/user/.local/bin/runsc"}}},
+            "other arguments": {"runtimes": {"runsc": {"runtimeArgs": ["--debug"]}}},
+            "missing arguments": {"runtimes": {"runsc": {"path": "/home/user/.local/bin/runsc"}}},
         }
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "daemon.json"
@@ -238,7 +237,9 @@ class TestRunDoctor(unittest.TestCase):
                 for name, config in cases.items():
                     with self.subTest(name=name):
                         config_path.write_text(json.dumps(config), encoding="utf-8")
-                        self.assertTrue(_check_runsc_cgroup_handling().passed)
+                        result = _check_runsc_cgroup_handling()
+                        self.assertFalse(result.passed)
+                        self.assertIn("rerun scripts/setup_agent_sandbox.sh", result.detail)
 
     def test_cgroup_check_rejects_malformed_config(self) -> None:
         cases = {

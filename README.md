@@ -27,11 +27,11 @@ Each managed OMP invocation receives a **fresh** container. The runtime force-re
 
 - **[Rootless Docker](https://docs.docker.com/engine/security/rootless/):** container UID `0` maps to an unprivileged host user
 - **[gVisor](https://github.com/google/gvisor):** `runsc` places a user-space kernel between the workload and the host kernel interface
-- **Explicit container policy:** all Linux capabilities dropped, `no-new-privileges`, read-only root filesystem, 4 GiB memory limit, two CPUs, and 100-process limit
+- **Explicit container policy:** all Linux capabilities dropped, `no-new-privileges`, and a read-only root filesystem
 - **Bounded writable paths:** `/runtime` is a 1 GiB `nosuid,nodev` tmpfs and `/tmp` is a 64 MiB `nosuid,nodev` tmpfs
 - **Ephemeral OMP home:** OMP receives a transaction-local writable home. No live container, writable OMP home, or active-state marker is reused
 
-The resource limits are required, not aspirational. Doctor rejects a daemon configuration containing `--ignore-cgroups` and starts a minimal limited container to verify that the registered runtime can actually enforce the policy.
+CPU, memory, and PID cgroup limits are intentionally disabled. Rootless `runsc` cannot create systemd cgroups on cgroup-v2 hosts due to [gVisor issue #11543](https://github.com/google/gvisor/issues/11543). Rootless Docker, gVisor syscall isolation, dropped capabilities, `no-new-privileges`, read-only roots, bounded tmpfs mounts, and process timeouts remain enforced.
 
 ### 2. Filesystem scoping and workspace continuity
 
@@ -94,11 +94,9 @@ uv sync
 uv run agent-sandbox doctor --profile gigachad
 ```
 
-The setup script installs or reuses rootless Docker, downloads and SHA-512-verifies `runsc`, registers it with the rootless daemon without `--ignore-cgroups`, restarts the user Docker service, and builds `agent-sandbox:trixie`.
+The setup script installs or reuses rootless Docker, downloads and SHA-512-verifies `runsc`, registers it with `--ignore-cgroups`, restarts the user Docker service, and builds `agent-sandbox:trixie`. This avoids gVisor issue [#11543](https://github.com/google/gvisor/issues/11543) on cgroup-v2 hosts.
 
-Doctor exits `0` only when every check passes. It checks the profile, Docker connection, rootless mode, registered `runsc`, daemon cgroup configuration, image, and declared mount sources. It then starts one minimal limited container before checking OMP, Python interpreters, `AGENTS.md`, and declared host services.
-
-If Doctor reports `runsc-rootless-cgroups` with `Interactive authentication required`, the host is affected by gVisor issue #11543. Do not add `--ignore-cgroups`. That workaround disables the CPU, memory, and PID limits required by this project.
+Doctor exits `0` only when every check passes. It checks the profile, Docker connection, rootless mode, registered `runsc`, required cgroup bypass, image, and declared mount sources. It then starts one container before checking OMP, Python interpreters, `AGENTS.md`, and declared host services.
 
 ### 2. Run a managed OMP invocation
 
@@ -223,8 +221,6 @@ Profile validation rejects duplicate YAML keys, unknown fields, unsafe names, no
 | Workspace capture archive | 512 MiB |
 | `/runtime` tmpfs | 1 GiB |
 | `/tmp` tmpfs | 64 MiB |
-| Container memory | 4 GiB |
-| Container CPU | 2 CPUs |
-| Container PIDs | 100 |
+| Container CPU, memory, and PIDs | Unbounded by this project |
 
 Agents-in-a-Box reduces risk. It does not make trusted mounts, forwarded secrets, configured host services, or bridge-network reachability safe by itself. The host application must decide what to persist, expose, and authorize.

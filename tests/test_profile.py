@@ -187,7 +187,7 @@ omp_binary: /usr/local/bin/omp
         self.assertEqual(reordered.runtime_fingerprint, fingerprint)
         with patch.dict(os.environ, {"OPENAI_API_KEY": "secret-value-that-must-not-affect-the-fingerprint"}):
             self.assertEqual(profile.runtime_fingerprint, fingerprint)
-        with patch("agent_sandbox.profile.RUNTIME_POLICY_DESCRIPTOR", "agent-sandbox-runtime-policy-v4"):
+        with patch("agent_sandbox.profile.RUNTIME_POLICY_DESCRIPTOR", "agent-sandbox-runtime-policy-v5"):
             self.assertNotEqual(replace(profile).runtime_fingerprint, fingerprint)
 
 

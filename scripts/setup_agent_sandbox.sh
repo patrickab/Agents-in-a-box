@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install rootless Docker, the latest gVisor runtime, and sandbox prerequisites on Debian or Arch Linux.
+# Install rootless Docker, the latest gVisor runtime, and sandbox prerequisites on Debian or Arch Linux
+# (including Arch derivatives such as Omarchy).
 # This script does not remove Docker packages, disable system services, or edit shell startup files.
 
 set -euo pipefail
@@ -7,6 +8,7 @@ set -euo pipefail
 RUNSC_PATH="$HOME/.local/bin/runsc"
 DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
 CONFIG_FILE="$HOME/.config/docker/daemon.json"
+
 
 fail() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -35,12 +37,19 @@ install_rootless_docker_packages() {
     [[ -r /etc/os-release ]] || fail "Cannot identify the Linux distribution because /etc/os-release is unavailable."
     . /etc/os-release
 
+    # Omarchy and other Arch derivatives report their own ID and Arch through ID_LIKE.
+    if [[ "$ID" == arch || " ${ID_LIKE:-} " == *" arch "* ]]; then
+        arch_like=true
+    else
+        arch_like=false
+    fi
+
     if [[ "$ID" == debian || "$ID" == ubuntu ]]; then
         require_command sudo
         require_command apt-get
         sudo apt-get update
         sudo apt-get install -y docker-ce docker-ce-rootless-extras uidmap
-    elif [[ "$ID" == arch ]]; then
+    elif [[ "$arch_like" == true ]]; then
         if command -v yay >/dev/null 2>&1; then
             aur_helper=yay
         elif command -v paru >/dev/null 2>&1; then
@@ -50,7 +59,7 @@ install_rootless_docker_packages() {
         fi
         "$aur_helper" -S --needed --noconfirm docker docker-rootless-extras slirp4netns
     else
-        fail "Unsupported Linux distribution '$ID'. Supported distributions are Debian, Ubuntu, and Arch Linux."
+        fail "Unsupported Linux distribution '$ID' (ID_LIKE='${ID_LIKE:-}'). Supported distributions are Debian, Ubuntu, and Arch Linux or an Arch derivative."
     fi
 }
 
@@ -68,15 +77,24 @@ ensure_rootless_docker() {
     if [[ -z "$rootless_setup_tool" && -x /usr/share/docker.io/contrib/dockerd-rootless-setuptool.sh ]]; then
         rootless_setup_tool=/usr/share/docker.io/contrib/dockerd-rootless-setuptool.sh
     fi
-    [[ -n "$rootless_setup_tool" ]] || fail "Docker was installed but its rootless setup tool is unavailable."
 
-    if systemctl is-active --quiet docker.service; then
-        printf '%s\n' 'A rootful Docker service is active. Leaving it running and installing the rootless daemon alongside it.'
-        "$rootless_setup_tool" install --force
+    if [[ -n "$rootless_setup_tool" ]]; then
+        if systemctl is-active --quiet docker.service; then
+            printf '%s\n' 'A rootful Docker service is active. Leaving it running and installing the rootless daemon alongside it.'
+            "$rootless_setup_tool" install --force
+        else
+            "$rootless_setup_tool" install
+        fi
+        systemctl --user start docker
+    elif [[ -f /usr/lib/systemd/user/docker.service || -f "$HOME/.config/systemd/user/docker.service" ]]; then
+        # Arch's docker-rootless-extras package ships the user unit but not the
+        # Debian-style setup helper.
+        printf '%s\n' 'Using the rootless Docker user service provided by the installed package.'
+        systemctl --user daemon-reload
+        systemctl --user enable --now docker.service
     else
-        "$rootless_setup_tool" install
+        fail "Docker was installed but its rootless setup tool and user service are unavailable."
     fi
-    systemctl --user start docker
 }
 
 printf '%s\n' 'Ensuring a rootless Docker daemon is available...'
@@ -138,7 +156,10 @@ if not isinstance(config, dict):
 runtimes = config.setdefault("runtimes", {})
 if not isinstance(runtimes, dict):
     raise SystemExit(f"Docker configuration field 'runtimes' must be an object: {config_path}")
-runtimes["runsc"] = {"path": runsc_path}
+runtimes["runsc"] = {
+    "path": runsc_path,
+    "runtimeArgs": ["--ignore-cgroups"],
+}
 fd, temporary_path = tempfile.mkstemp(dir=os.path.dirname(config_path), prefix="daemon.json.", text=True)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as config_file:
@@ -150,6 +171,8 @@ finally:
         os.unlink(temporary_path)
 PY
 
+printf '%s\n' 'Configured runsc without CPU, memory, or PID cgroup limits.'
+
 printf '%s\n' 'Restarting the current user Docker service...'
 systemctl --user restart docker || fail "Could not restart the user Docker service. Restart it manually, then rerun this script."
 docker info >/dev/null 2>&1 || fail "Rootless Docker did not become available after restart."
@@ -159,4 +182,4 @@ printf '%s\n' 'Rootless Docker and gVisor runsc are registered.'
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 docker build -t agent-sandbox:trixie -f "$repository_root/docker/Dockerfile" "$repository_root"
 printf '%s\n' 'Built agent-sandbox:trixie.'
-printf '%s\n' 'Run agent-sandbox doctor with a profile to verify rootless cgroup startup and profile prerequisites.'
+printf '%s\n' 'Run agent-sandbox doctor with a profile to verify container startup and profile prerequisites.'

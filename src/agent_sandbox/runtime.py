@@ -30,7 +30,6 @@ from agent_sandbox.config import (
     MAX_PROMPT_IMAGE_BYTES,
     MAX_RESTORE_ARCHIVE_BYTES,
     MAX_RETAINED_OUTPUT_BYTES,
-    RESOURCE_LIMITS,
     RUNTIME_TMPFS_SIZE,
     TMP_TMPFS_SIZE,
     RuntimeResourceNames,
@@ -158,7 +157,7 @@ class ExecResult:
 
 
 def _container_policy(network: str) -> dict:
-    """Build the mandatory security, resource, and network policy for every container."""
+    """Build the mandatory isolation and network policy for every container."""
     if network == "bridge":
         network_policy = {"network_mode": "bridge"}
     elif network == "disabled":
@@ -170,7 +169,6 @@ def _container_policy(network: str) -> dict:
         "user": "0:0",
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges"],
-        **RESOURCE_LIMITS,
         **network_policy,
     }
 

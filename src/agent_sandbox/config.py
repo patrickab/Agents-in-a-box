@@ -30,11 +30,6 @@ def runtime_resource_names(namespace: str | None = None) -> RuntimeResourceNames
     prefix = f"agent-sandbox-{namespace}-runtime"
     return RuntimeResourceNames(prefix, f"/tmp/{prefix}.lock")
 
-RESOURCE_LIMITS = {
-    "mem_limit": "4g",
-    "nano_cpus": 2_000_000_000,
-    "pids_limit": 100,
-}
 
 MANAGED_OMP_TIMEOUT_SECONDS = 300
 MAX_PROMPT_IMAGE_BYTES = 32 * 1024 * 1024
@@ -45,7 +40,7 @@ RUNTIME_TMPFS_SIZE = "1g"
 TMP_TMPFS_SIZE = "64m"
 
 # Bump this marker whenever static runtime behavior changes in a way that affects reuse.
-RUNTIME_POLICY_DESCRIPTOR = "agent-sandbox-runtime-policy-v3"
+RUNTIME_POLICY_DESCRIPTOR = "agent-sandbox-runtime-policy-v4"
 
 PROFILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
 
