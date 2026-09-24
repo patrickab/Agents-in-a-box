@@ -28,7 +28,7 @@ Each managed OMP invocation receives a **fresh** container. The runtime force-re
 - **[Rootless Docker](https://docs.docker.com/engine/security/rootless/):** container UID `0` maps to an unprivileged host user
 - **[gVisor](https://github.com/google/gvisor):** `runsc` places a user-space kernel between the workload and the host kernel interface
 - **Explicit container policy:** all Linux capabilities dropped, `no-new-privileges`, and a read-only root filesystem
-- **Bounded writable paths:** `/runtime` is a 1 GiB `nosuid,nodev` tmpfs and `/tmp` is a 64 MiB `nosuid,nodev` tmpfs
+- **Bounded writable paths:** `/runtime` is a 1 GiB `exec,nosuid,nodev` tmpfs (OMP loads its extracted native addon from there) and `/tmp` is a 64 MiB `nosuid,nodev` tmpfs
 - **Ephemeral OMP home:** OMP receives a transaction-local writable home. No live container, writable OMP home, or active-state marker is reused
 
 CPU, memory, and PID cgroup limits are intentionally disabled. Rootless `runsc` cannot create systemd cgroups on cgroup-v2 hosts due to [gVisor issue #11543](https://github.com/google/gvisor/issues/11543). Rootless Docker, gVisor syscall isolation, dropped capabilities, `no-new-privileges`, read-only roots, bounded tmpfs mounts, and process timeouts remain enforced.
@@ -47,7 +47,7 @@ A profile grants exact host paths. Mounts are administrator-controlled policy, n
 
 Managed OMP containers and Doctor probes use Docker bridge networking. Disposable Python execution is network-disabled.
 
-- A profile may explicitly expose a declared host service as `http://<routable-host-address>:<port>`
+- A profile may explicitly expose a declared host service as `http://10.200.200.1:<port>`. The setup script adds that `lo` alias and a per-port `systemd-socket-proxyd` to `127.0.0.1:<port>` (ports from `HOST_SERVICE_PORTS`, default `11434`), so only declared ports are reachable and host services stay loopback-bound
 - The runtime does not install firewall rules, enforce an egress allowlist, or isolate the host LAN
 - Managed OMP runs time out after 300 seconds
 - Prompt images are limited to 32 MiB combined
@@ -86,7 +86,7 @@ flowchart TD
 
 ### 1. Install and diagnose
 
-The setup script supports Debian, Ubuntu, and Arch Linux on `x86_64` or `aarch64`. It requires a user systemd session. It uses `sudo` only when it must install rootless Docker packages or configure subordinate IDs.
+The setup script supports Debian, Ubuntu, and Arch Linux on `x86_64` or `aarch64`. It requires a user systemd session. It uses `sudo` only when it must install rootless Docker packages, configure subordinate IDs, or install the host-service loopback alias.
 
 ```bash
 uv sync
@@ -94,7 +94,16 @@ uv sync
 uv run agent-sandbox doctor --profile gigachad
 ```
 
-The setup script installs or reuses rootless Docker, downloads and SHA-512-verifies `runsc`, registers it with `--ignore-cgroups`, restarts the user Docker service, and builds `agent-sandbox:trixie`. This avoids gVisor issue [#11543](https://github.com/google/gvisor/issues/11543) on cgroup-v2 hosts.
+The setup script installs or reuses rootless Docker, downloads and SHA-512-verifies `runsc`, registers it with `--ignore-cgroups`, restarts the user Docker service, and builds `agent-sandbox:trixie`. This avoids gVisor issue [#11543](https://github.com/google/gvisor/issues/11543) on cgroup-v2 hosts. It finishes by running `setup_host_services.sh`.
+
+`scripts/setup_host_services.sh` bridges loopback-only host services into containers. Rootless Docker blocks container access to host `127.0.0.1`, so the script installs a persistent `lo` alias `10.200.200.1` (system unit `agent-sandbox-host-alias.service`) and one user socket unit `agent-sandbox-host-<port>.socket` per port that proxies `10.200.200.1:<port>` to `127.0.0.1:<port>`. Services keep binding to `127.0.0.1` only. It is idempotent and can be run alone on an existing install. `HOST_SERVICE_PORTS` must cover every port under the profile's `host_services` (default `11434` for Ollama):
+
+```bash
+./scripts/setup_host_services.sh
+HOST_SERVICE_PORTS="11434 8080" ./scripts/setup_host_services.sh
+```
+
+Profiles mount the OMP executable itself, not a launcher. A wrapper such as a `mise` shim fails inside the image. With mise, mount `~/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp`, which follows upgrades.
 
 Doctor exits `0` only when every check passes. It checks the profile, Docker connection, rootless mode, registered `runsc`, required cgroup bypass, image, and declared mount sources. It then starts one container before checking OMP, Python interpreters, `AGENTS.md`, and declared host services.
 

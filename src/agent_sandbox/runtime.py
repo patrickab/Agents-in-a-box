@@ -11,12 +11,10 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 import fcntl
 import hashlib
-import io
 import math
 import os
 from pathlib import PurePosixPath
 import posixpath
-import socket
 import tarfile
 import tempfile
 import threading
@@ -25,6 +23,7 @@ from docker.types import Mount as DockerMount
 
 from agent_sandbox.config import (
     DOCKER_HOST,
+    HOST_SERVICE_ADDRESS,
     MANAGED_OMP_TIMEOUT_SECONDS,
     MAX_CAPTURED_WORKSPACE_BYTES,
     MAX_PROMPT_IMAGE_BYTES,
@@ -397,11 +396,12 @@ class SandboxRuntime:
     def _tmpfs(*, runtime: bool) -> dict[str, str]:
         tmpfs = {"/tmp": f"rw,nosuid,nodev,size={TMP_TMPFS_SIZE}"}
         if runtime:
-            tmpfs["/runtime"] = f"rw,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}"
+            # OMP extracts and dlopens its native addon under $HOME, which lives here.
+            tmpfs["/runtime"] = f"rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}"
         return tmpfs
 
-    def _create_managed_container(self, image_id: str, restore_archive_path: str | None) -> object:
-        mounts = self._managed_mounts()
+    def _create_managed_container(self, image_id: str, restore_archive_path: str | None, input_mounts: list[DockerMount]) -> object:
+        mounts = [*self._managed_mounts(), *input_mounts]
         if restore_archive_path is not None:
             mounts.append(
                 DockerMount(target=_RESTORE_ARCHIVE_PATH, source=restore_archive_path, type="bind", read_only=True)
@@ -422,19 +422,10 @@ class SandboxRuntime:
         forwarded = {name: os.environ[name] for name in self.profile.env_passthrough if name in os.environ}
         if not self.profile.host_services:
             return forwarded
-        host = self.host_address()
-        return {**forwarded, **{name: f"http://{host}:{port}" for name, port in self.profile.host_services}}
-
-    def host_address(self) -> str:
-        """Return the routable host address for explicit bridge-networked services."""
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            probe.connect(("192.0.2.1", 9))
-            return probe.getsockname()[0]
-        except OSError as exc:
-            raise ContainerRuntimeError("cannot determine a host address for bridged host services") from exc
-        finally:
-            probe.close()
+        return {
+            **forwarded,
+            **{name: f"http://{HOST_SERVICE_ADDRESS}:{port}" for name, port in self.profile.host_services},
+        }
 
     def _omp_environment(self) -> dict[str, str]:
         bin_dirs = [str(PurePosixPath(path).parent) for _label, path in self.profile.python_interpreters]
@@ -457,30 +448,6 @@ class SandboxRuntime:
             )
 
 
-    def _materialize_append_system(self, container: object, append_system: str) -> None:
-        self._run_or_raise(container, f"rm -rf {_APPEND_SYSTEM_DIR} && mkdir -p {_APPEND_SYSTEM_DIR}")
-        content = append_system.encode("utf-8")
-        archive = io.BytesIO()
-        with tarfile.open(fileobj=archive, mode="w") as tar:
-            entry = tarfile.TarInfo("APPEND_SYSTEM.md")
-            entry.size = len(content)
-            entry.mode = 0o600
-            tar.addfile(entry, io.BytesIO(content))
-        if not container.put_archive(_APPEND_SYSTEM_DIR, archive.getvalue()):
-            raise ContainerRuntimeError("failed to materialize appended system prompt")
-
-    def _materialize_prompt_images(self, container: object, prompt_images: tuple[PromptImage, ...]) -> None:
-        self._run_or_raise(container, f"rm -rf {_PROMPT_IMAGES_DIR} && mkdir -p {_PROMPT_IMAGES_DIR}")
-        archive = io.BytesIO()
-        with tarfile.open(fileobj=archive, mode="w") as tar:
-            for image in prompt_images:
-                entry = tarfile.TarInfo(image.filename)
-                entry.size = len(image.content)
-                entry.mode = 0o600
-                tar.addfile(entry, io.BytesIO(image.content))
-        if not container.put_archive(_PROMPT_IMAGES_DIR, archive.getvalue()):
-            raise ContainerRuntimeError("failed to materialize prompt images")
-
     def _prepare_omp_home(self, container: object) -> None:
         """Create a writable OMP home in this transaction's runtime tmpfs."""
         self._run_or_raise(
@@ -489,19 +456,8 @@ class SandboxRuntime:
             f"{{ [ ! -d /root/.omp ] || cp -a /root/.omp/. {_OMP_HOME}/.omp/; }}",
         )
 
-    def _invoke_omp(
-        self,
-        container: object,
-        argv: list[str],
-        *,
-        prompt_images: tuple[PromptImage, ...],
-        append_system: str | None,
-    ) -> ExecResult:
+    def _invoke_omp(self, container: object, argv: list[str]) -> ExecResult:
         self._prepare_omp_home(container)
-        if append_system is not None:
-            self._materialize_append_system(container, append_system)
-        if prompt_images:
-            self._materialize_prompt_images(container, prompt_images)
         result = _stream_container_exec(container, argv, workdir=INTERNAL_WORKDIR, environment=self._omp_environment())
         if result.exit_code in {124, 137}:
             raise ContainerRuntimeError(f"OMP execution exceeded {MANAGED_OMP_TIMEOUT_SECONDS}s limit")
@@ -576,10 +532,33 @@ class SandboxRuntime:
             )
         return request.workspace_archive_path
 
+    @staticmethod
+    def _stage_invocation_inputs(request: ManagedExecutionRequest, staging_dir: str) -> list[DockerMount]:
+        """Write per-run inputs to host files and expose them as read-only bind mounts.
+
+        Under gVisor the /runtime tmpfs lives in the sandbox kernel, invisible to Docker's
+        host-side archive API, so inputs must enter the way the restore archive does.
+        """
+        mounts = []
+        if request.append_system is not None:
+            append_dir = os.path.join(staging_dir, "append-system")
+            os.mkdir(append_dir)
+            with open(os.path.join(append_dir, "APPEND_SYSTEM.md"), "w", encoding="utf-8") as file:
+                file.write(request.append_system)
+            mounts.append(DockerMount(target=_APPEND_SYSTEM_DIR, source=append_dir, type="bind", read_only=True))
+        if request.prompt_images:
+            images_dir = os.path.join(staging_dir, "prompt-images")
+            os.mkdir(images_dir)
+            for image in request.prompt_images:
+                with open(os.path.join(images_dir, image.filename), "xb") as file:
+                    file.write(image.content)
+            mounts.append(DockerMount(target=_PROMPT_IMAGES_DIR, source=images_dir, type="bind", read_only=True))
+        return mounts
+
     def execute(self, request: ManagedExecutionRequest) -> ManagedExecutionResult:
         """Run one fresh-container managed OMP transaction under the namespace lease."""
         image_paths = tuple(f"{_PROMPT_IMAGES_DIR}/{image.filename}" for image in request.prompt_images)
-        with _runtime_lease(self._resources().lock_path):
+        with _runtime_lease(self._resources().lock_path), tempfile.TemporaryDirectory(prefix="agent-sandbox-inputs-") as staging_dir:
             image_id = self._verify_environment()
             self._remove_stale_container()
             effective_fingerprint = self._effective_runtime_fingerprint(image_id)
@@ -588,7 +567,9 @@ class SandboxRuntime:
             capture_path: str | None = None
             operation_error: BaseException | None = None
             try:
-                container = self._create_managed_container(image_id, restore_archive)
+                container = self._create_managed_container(
+                    image_id, restore_archive, self._stage_invocation_inputs(request, staging_dir)
+                )
                 container.start()
                 self._restore_workspace(container, restore_archive)
                 argv = build_omp_argv(
@@ -603,10 +584,7 @@ class SandboxRuntime:
                     lean=request.lean,
                 )
                 exec_result = self._invoke_omp(
-                    container,
-                    ["timeout", "--signal=KILL", f"{MANAGED_OMP_TIMEOUT_SECONDS}s", *argv],
-                    prompt_images=request.prompt_images,
-                    append_system=request.append_system,
+                    container, ["timeout", "--signal=KILL", f"{MANAGED_OMP_TIMEOUT_SECONDS}s", *argv]
                 )
                 capture_path, workspace_sha256 = self._capture_workspace(container)
                 return ManagedExecutionResult(exec_result, capture_path, workspace_sha256, effective_fingerprint)

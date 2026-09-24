@@ -2,7 +2,8 @@ name: gigachad
 image: agent-sandbox:trixie
 workdir: /workspace
 mounts:
-  - source: /home/noob/.local/bin/omp
+  # The host wrapper invokes mise, unavailable inside the sandbox image.
+  - source: /home/noob/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp
     target: /usr/local/bin/omp
     mode: ro
   - source: /home/noob/git/gigachad-bot/.venv

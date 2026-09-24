@@ -9,6 +9,9 @@ DEFAULT_IMAGE_TAG = "agent-sandbox:trixie"
 RUNTIME_CONTAINER_NAME = "agent-sandbox-runtime"
 DOCKER_HOST = f"unix:///run/user/{os.getuid()}/docker.sock"
 ROOTLESS_DOCKER_DAEMON_CONFIG = os.path.join(os.path.expanduser("~"), ".config", "docker", "daemon.json")
+# Rootless Docker blocks host loopback, so containers reach declared host services through this
+# lo alias. scripts/setup_agent_sandbox.sh adds it and proxies each service port to 127.0.0.1.
+HOST_SERVICE_ADDRESS = "10.200.200.1"
 
 _NAMESPACE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 

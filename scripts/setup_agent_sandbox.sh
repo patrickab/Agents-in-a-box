@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install rootless Docker, the latest gVisor runtime, and sandbox prerequisites on Debian or Arch Linux
 # (including Arch derivatives such as Omarchy).
+# It then runs setup_host_services.sh to bridge loopback-only host services (Ollama) into containers.
 # This script does not remove Docker packages, disable system services, or edit shell startup files.
 
 set -euo pipefail
@@ -182,4 +183,5 @@ printf '%s\n' 'Rootless Docker and gVisor runsc are registered.'
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 docker build -t agent-sandbox:trixie -f "$repository_root/docker/Dockerfile" "$repository_root"
 printf '%s\n' 'Built agent-sandbox:trixie.'
+"$repository_root/scripts/setup_host_services.sh"
 printf '%s\n' 'Run agent-sandbox doctor with a profile to verify container startup and profile prerequisites.'

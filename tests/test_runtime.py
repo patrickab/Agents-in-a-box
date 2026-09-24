@@ -178,7 +178,7 @@ class TestManagedTransaction(unittest.TestCase):
             self.assertEqual(
                 kwargs["tmpfs"],
                 {
-                    "/runtime": f"rw,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}",
+                    "/runtime": f"rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}",
                     "/tmp": f"rw,nosuid,nodev,size={TMP_TMPFS_SIZE}",
                 },
             )

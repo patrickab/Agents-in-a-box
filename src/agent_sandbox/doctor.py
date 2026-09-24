@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 from typing import Callable, Optional
 
-from agent_sandbox.config import ROOTLESS_DOCKER_DAEMON_CONFIG
+from agent_sandbox.config import HOST_SERVICE_ADDRESS, ROOTLESS_DOCKER_DAEMON_CONFIG
 from agent_sandbox.profile import Mount, Profile, ProfileError, load_profile
-from agent_sandbox.runtime import ContainerRuntimeError, SandboxRuntime, SecurityEnvironmentError
+from agent_sandbox.runtime import SandboxRuntime, SecurityEnvironmentError
 import docker
 
 
@@ -182,10 +182,7 @@ def _check_host_services(runtime: SandboxRuntime, profile: Profile) -> list:
     """Confirm each bridged host daemon answers from inside a sandbox container."""
     if not profile.host_services:
         return []
-    try:
-        host = runtime.host_address()
-    except ContainerRuntimeError as e:
-        return [CheckResult("host-services", False, str(e))]
+    host = HOST_SERVICE_ADDRESS
     interpreter = next((path for _label, path in profile.python_interpreters), None)
     results = []
     for name, port in profile.host_services:
@@ -198,7 +195,10 @@ def _check_host_services(runtime: SandboxRuntime, profile: Profile) -> list:
             _run_ephemeral(runtime, [interpreter, "-c", script])
             results.append(CheckResult(name, True, f"host service reachable at {url}"))
         except docker.errors.DockerException as e:
-            detail = f"host service at {url} unreachable; bind the daemon to {host} or drop it from host_services: {e}"
+            detail = (
+                f"host service at {url} unreachable; rerun scripts/setup_agent_sandbox.sh to add the {host} "
+                f"loopback alias and proxy port {port} to 127.0.0.1: {e}"
+            )
             results.append(CheckResult(name, False, detail))
     return results
 
