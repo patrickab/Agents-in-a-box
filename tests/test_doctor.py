@@ -1,5 +1,6 @@
 """Test doctor result aggregation without a Docker daemon."""
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -8,177 +9,77 @@ from unittest.mock import MagicMock, patch
 
 from agent_sandbox.doctor import (
     CheckResult,
+    _check_environment,
+    _check_host_services,
     _check_runsc_cgroup_handling,
     _check_runsc_startup,
     run_doctor,
 )
+from agent_sandbox.errors import ContainerRuntimeError, ProfileError, SecurityEnvironmentError
+from agent_sandbox.profile import Profile
+
+_STAGED_CHECKS = (
+    ("_check_environment", CheckResult("docker-environment", True, "ready")),
+    ("_check_runsc_cgroup_handling", CheckResult("runsc-cgroup-handling", True, "disabled")),
+    ("_check_mounts_exist", [CheckResult("mount-ok:/workspace", True, "ok")]),
+    ("_check_runsc_startup", CheckResult("runsc-rootless-cgroups", True, "ready")),
+    ("_check_omp", CheckResult("omp-binary", True, "ready")),
+    ("_check_python", [CheckResult("venv", True, "ready")]),
+    ("_check_agents_md", CheckResult("agents-md-visible", True, "visible")),
+    ("_check_host_services", [CheckResult("OLLAMA_HOST", True, "reachable")]),
+)
+
+
+def _flatten(value: CheckResult | list[CheckResult]) -> list[CheckResult]:
+    return value if isinstance(value, list) else [value]
 
 
 class TestRunDoctor(unittest.TestCase):
-    """Exercise the doctor's public aggregated result contract."""
+    """Exercise the doctor's staged result contract."""
 
-    @patch("agent_sandbox.doctor._check_host_services")
-    @patch("agent_sandbox.doctor._check_agents_md")
-    @patch("agent_sandbox.doctor._check_python")
-    @patch("agent_sandbox.doctor._check_omp")
-    @patch("agent_sandbox.doctor._check_runsc_startup")
-    @patch("agent_sandbox.doctor._check_mounts_exist")
-    @patch("agent_sandbox.doctor._check_image")
-    @patch("agent_sandbox.doctor._check_runsc_cgroup_handling")
-    @patch("agent_sandbox.doctor._check_rootless_and_runsc")
-    @patch("agent_sandbox.doctor.SandboxRuntime")
-    @patch("agent_sandbox.doctor.load_profile")
-    def test_aggregates_every_check_result(
-        self,
-        load_profile: MagicMock,
-        runtime_class: MagicMock,
-        rootless: MagicMock,
-        cgroup_handling: MagicMock,
-        image: MagicMock,
-        mounts: MagicMock,
-        runsc_startup: MagicMock,
-        omp: MagicMock,
-        python: MagicMock,
-        agents_md: MagicMock,
-        host_services: MagicMock,
-    ) -> None:
-        profile = MagicMock()
-        runtime = MagicMock()
-        load_profile.return_value = profile
-        runtime_class.return_value = runtime
-        rootless.return_value = [CheckResult("rootless-docker", True, "enabled")]
-        cgroup_handling.return_value = CheckResult("runsc-cgroup-handling", True, "limits enforced")
-        image.return_value = CheckResult("image-available", True, "present")
-        runsc_startup.return_value = CheckResult("runsc-rootless-cgroups", True, "ready")
-        mounts.return_value = [CheckResult("mount-ok:/workspace", True, "ok")]
-        omp.return_value = CheckResult("omp-binary", True, "ready")
-        python.return_value = [CheckResult("venv", True, "ready")]
-        agents_md.return_value = CheckResult("agents-md-visible", True, "visible")
-        host_services.return_value = [CheckResult("OLLAMA_HOST", False, "unreachable")]
+    def _run(self, failing: str | None) -> tuple[list[CheckResult], dict[str, MagicMock]]:
+        checks: dict[str, MagicMock] = {}
+        with patch("agent_sandbox.doctor.load_profile"), patch("agent_sandbox.doctor.SandboxRuntime"):
+            patches = []
+            for name, result in _STAGED_CHECKS:
+                if name == failing:
+                    result = (
+                        [replace(item, passed=False) for item in result] if isinstance(result, list) else replace(result, passed=False)
+                    )
+                patcher = patch(f"agent_sandbox.doctor.{name}", return_value=result)
+                checks[name] = patcher.start()
+                patches.append(patcher)
+            try:
+                return run_doctor("gigachad"), checks
+            finally:
+                for patcher in patches:
+                    patcher.stop()
 
-        results = run_doctor("gigachad")
+    def test_runs_every_stage_when_all_checks_pass(self) -> None:
+        results, _checks = self._run(failing=None)
 
-        runtime_class.assert_called_once_with(profile)
-        rootless.assert_called_once_with(runtime)
-        cgroup_handling.assert_called_once_with()
-        image.assert_called_once_with(runtime, profile)
-        mounts.assert_called_once_with(profile)
-        runsc_startup.assert_called_once_with(runtime)
-        omp.assert_called_once_with(runtime, profile)
-        python.assert_called_once_with(runtime, profile)
-        agents_md.assert_called_once_with(runtime, profile)
-        host_services.assert_called_once_with(runtime, profile)
-        self.assertEqual(
-            results,
-            [
-                CheckResult("rootless-docker", True, "enabled"),
-                CheckResult("runsc-cgroup-handling", True, "limits enforced"),
-                CheckResult("image-available", True, "present"),
-                CheckResult("mount-ok:/workspace", True, "ok"),
-                CheckResult("runsc-rootless-cgroups", True, "ready"),
-                CheckResult("omp-binary", True, "ready"),
-                CheckResult("venv", True, "ready"),
-                CheckResult("agents-md-visible", True, "visible"),
-                CheckResult("OLLAMA_HOST", False, "unreachable"),
-            ],
-        )
+        self.assertEqual(results, [item for _name, result in _STAGED_CHECKS for item in _flatten(result)])
 
-    @patch("agent_sandbox.doctor._check_host_services")
-    @patch("agent_sandbox.doctor._check_agents_md")
-    @patch("agent_sandbox.doctor._check_python")
-    @patch("agent_sandbox.doctor._check_omp")
-    @patch("agent_sandbox.doctor._check_runsc_startup")
-    @patch("agent_sandbox.doctor._check_mounts_exist")
-    @patch("agent_sandbox.doctor._check_image")
-    @patch("agent_sandbox.doctor._check_runsc_cgroup_handling")
-    @patch("agent_sandbox.doctor._check_rootless_and_runsc")
-    @patch("agent_sandbox.doctor.SandboxRuntime")
-    @patch("agent_sandbox.doctor.load_profile")
-    def test_stops_before_runtime_probes_when_prerequisite_fails(
-        self,
-        load_profile: MagicMock,
-        runtime_class: MagicMock,
-        rootless: MagicMock,
-        cgroup_handling: MagicMock,
-        image: MagicMock,
-        mounts: MagicMock,
-        runsc_startup: MagicMock,
-        omp: MagicMock,
-        python: MagicMock,
-        agents_md: MagicMock,
-        host_services: MagicMock,
-    ) -> None:
-        profile = MagicMock()
-        runtime = MagicMock()
-        load_profile.return_value = profile
-        runtime_class.return_value = runtime
-        cgroup_handling.return_value = CheckResult("runsc-cgroup-handling", True, "limits enforced")
-
-        for prerequisites in (
-            [CheckResult("docker-connection", False, "Docker unavailable")],
-            [
-                CheckResult("rootless-docker", False, "disabled"),
-                CheckResult("gvisor-runsc", True, "registered"),
-            ],
-            [
-                CheckResult("rootless-docker", True, "enabled"),
-                CheckResult("gvisor-runsc", False, "missing"),
-            ],
+    def test_stops_after_the_stage_with_a_failure(self) -> None:
+        # Stage boundaries: environment+cgroup config, mounts, runsc startup, then in-container probes.
+        for failing, stage_end in (
+            ("_check_environment", 2),
+            ("_check_runsc_cgroup_handling", 2),
+            ("_check_mounts_exist", 3),
+            ("_check_runsc_startup", 4),
+            ("_check_omp", 8),
         ):
-            with self.subTest(prerequisites=prerequisites):
-                rootless.return_value = prerequisites
+            with self.subTest(failing=failing):
+                results, checks = self._run(failing)
 
-                self.assertEqual(run_doctor("gigachad"), prerequisites)
-
-                image.assert_not_called()
-                mounts.assert_not_called()
-                omp.assert_not_called()
-                runsc_startup.assert_not_called()
-                python.assert_not_called()
-                agents_md.assert_not_called()
-                host_services.assert_not_called()
-                runtime.run_probe.assert_not_called()
-                cgroup_handling.assert_not_called()
-
-        rootless.return_value = [
-            CheckResult("rootless-docker", True, "enabled"),
-            CheckResult("gvisor-runsc", True, "registered"),
-        ]
-        cgroup_handling.return_value = CheckResult("runsc-cgroup-handling", False, "stale configuration")
-
-        expected = rootless.return_value + [cgroup_handling.return_value]
-        self.assertEqual(run_doctor("gigachad"), expected)
-        image.assert_not_called()
-        mounts.assert_not_called()
-        omp.assert_not_called()
-        python.assert_not_called()
-        agents_md.assert_not_called()
-        host_services.assert_not_called()
-        runtime.run_probe.assert_not_called()
-
-        cgroup_handling.return_value = CheckResult("runsc-cgroup-handling", True, "limits enabled")
-        image.return_value = CheckResult("image-available", True, "present")
-        mounts.return_value = [CheckResult("mount-ok:/workspace", True, "ok")]
-        runsc_startup.return_value = CheckResult(
-            "runsc-rootless-cgroups",
-            False,
-            "upstream limitation",
-        )
-        expected = rootless.return_value + [
-            cgroup_handling.return_value,
-            image.return_value,
-            *mounts.return_value,
-            runsc_startup.return_value,
-        ]
-        self.assertEqual(run_doctor("gigachad"), expected)
-        omp.assert_not_called()
-        python.assert_not_called()
-        agents_md.assert_not_called()
-        host_services.assert_not_called()
+                ran = [name for name, _result in _STAGED_CHECKS[:stage_end]]
+                skipped = [name for name, _result in _STAGED_CHECKS[stage_end:]]
+                self.assertTrue(all(checks[name].called for name in ran))
+                self.assertFalse(any(checks[name].called for name in skipped))
+                self.assertIn(False, [result.passed for result in results])
 
     @patch("agent_sandbox.doctor.load_profile")
     def test_returns_profile_load_failure_as_result(self, load_profile: MagicMock) -> None:
-        from agent_sandbox.profile import ProfileError
 
         load_profile.side_effect = ProfileError("profile missing")
 
@@ -186,10 +87,7 @@ class TestRunDoctor(unittest.TestCase):
 
     @patch("agent_sandbox.doctor.SandboxRuntime")
     @patch("agent_sandbox.doctor.load_profile")
-    def test_returns_runtime_connection_failure_as_result(
-        self, load_profile: MagicMock, runtime_class: MagicMock
-    ) -> None:
-        from agent_sandbox.runtime import SecurityEnvironmentError
+    def test_returns_runtime_connection_failure_as_result(self, load_profile: MagicMock, runtime_class: MagicMock) -> None:
 
         load_profile.return_value = MagicMock()
         runtime_class.side_effect = SecurityEnvironmentError("Docker unavailable")
@@ -268,3 +166,27 @@ class TestRunDoctor(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("could not read rootless Docker config", result.detail)
         self.assertIn("rerun scripts/setup_agent_sandbox.sh", result.detail)
+
+    def test_environment_failure_is_reported_not_raised(self) -> None:
+        runtime = MagicMock()
+        runtime.verify_environment.side_effect = SecurityEnvironmentError("Docker daemon is not rootless")
+
+        self.assertEqual(_check_environment(runtime), CheckResult("docker-environment", False, "Docker daemon is not rootless"))
+
+    def test_host_services_probe_each_port_and_explain_failures(self) -> None:
+        profile = Profile("p", "img", "/workspace", (), "/omp", python_interpreters={"venv": "/py"}, host_services={"A": 1, "B": 2})
+        runtime = MagicMock()
+        runtime.run_probe.side_effect = [None, ContainerRuntimeError("probe exited 1")]
+
+        results = _check_host_services(runtime, profile)
+
+        self.assertEqual([(result.name, result.passed) for result in results], [("A", True), ("B", False)])
+        self.assertIn("setup_host_services.sh", results[1].detail)
+        self.assertEqual(runtime.run_probe.call_args_list[0].args[0][0], "/py")
+
+    def test_host_services_without_interpreter_fail_without_probing(self) -> None:
+        runtime = MagicMock()
+        profile = Profile("p", "img", "/workspace", (), "/omp", host_services={"A": 1})
+
+        self.assertEqual([result.passed for result in _check_host_services(runtime, profile)], [False])
+        runtime.run_probe.assert_not_called()

@@ -7,60 +7,32 @@ paths and identifiers belong to the execution layer, not this record.
 from collections.abc import Mapping
 import dataclasses
 from pathlib import PurePosixPath, PureWindowsPath
-import re
 from types import MappingProxyType
 from typing import Any, Literal
 
 import yaml
-from yaml.constructor import ConstructorError
 
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+from agent_sandbox._validation import (
+    load_strict_yaml,
+    require_exact_fields,
+    require_mapping,
+    require_nonempty_string,
+    require_sha256,
+)
+
 _EXECUTION_STATUSES = frozenset({"completed", "failed"})
 _MANIFEST_FIELDS = frozenset(
     {"schema_version", "manifest_id", "profile", "runtime_fingerprint", "workspace", "outputs", "omp_sessions", "execution"}
 )
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects duplicate mapping keys."""
-
-    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict:
-        mapping = {}
-        for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            try:
-                if key in mapping:
-                    raise ConstructorError(
-                        "while constructing a mapping",
-                        node.start_mark,
-                        f"found duplicate key {key!r}",
-                        key_node.start_mark,
-                    )
-                mapping[key] = self.construct_object(value_node, deep=deep)
-            except TypeError as error:
-                raise ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    "mapping keys must be scalar",
-                    key_node.start_mark,
-                ) from error
-        return mapping
-
-
-def _require_identifier(field: str, value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a nonempty string")
-    return value
-
-
 def _require_asset_id(field: str, value: object, *, allow_none: bool = False) -> str | None:
     if value is None and allow_none:
         return None
-    identifier = _require_identifier(field, value)
-    path = PurePosixPath(identifier)
+    identifier = require_nonempty_string(field, value)
     if (
         "\\" in identifier
-        or path.is_absolute()
+        or PurePosixPath(identifier).is_absolute()
         or PureWindowsPath(identifier).is_absolute()
         or any(component in {".", ".."} for component in identifier.split("/"))
     ):
@@ -77,8 +49,7 @@ class WorkspaceRef:
 
     def __post_init__(self) -> None:
         _require_asset_id("snapshot_asset_id", self.snapshot_asset_id, allow_none=True)
-        if not isinstance(self.sha256, str) or not _SHA256_PATTERN.fullmatch(self.sha256):
-            raise ValueError("workspace sha256 must be a 64-character lowercase hexadecimal digest")
+        require_sha256("workspace sha256", self.sha256)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -90,7 +61,7 @@ class Artifact:
 
     def __post_init__(self) -> None:
         _require_asset_id("asset_id", self.asset_id)
-        _require_identifier("mime_type", self.mime_type)
+        require_nonempty_string("mime_type", self.mime_type)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,21 +85,21 @@ class OmpSessionState:
     state_asset_id: str | None
 
     def __post_init__(self) -> None:
-        _require_identifier("session_id", self.session_id)
+        require_nonempty_string("session_id", self.session_id)
         _require_asset_id("state_asset_id", self.state_asset_id, allow_none=True)
 
 
 @dataclasses.dataclass(frozen=True)
 class Execution:
-    """Record durable metadata for one execution; empty ``created_at`` means legacy unknown time."""
+    """Record durable metadata for one execution."""
 
     run_id: str
-    status: str
+    status: Literal["completed", "failed"]
     exit_code: int | None
     created_at: str
 
     def __post_init__(self) -> None:
-        _require_identifier("run_id", self.run_id)
+        require_nonempty_string("run_id", self.run_id)
         if not isinstance(self.status, str) or self.status not in _EXECUTION_STATUSES:
             raise ValueError(f"execution status must be one of {', '.join(sorted(_EXECUTION_STATUSES))}")
         if self.exit_code is not None and type(self.exit_code) is not int:
@@ -153,24 +124,22 @@ class SandboxManifest:
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("schema_version must be 1")
-        _require_identifier("manifest_id", self.manifest_id)
-        _require_identifier("profile", self.profile)
-        _require_identifier("runtime_fingerprint", self.runtime_fingerprint)
+        require_nonempty_string("manifest_id", self.manifest_id)
+        require_nonempty_string("profile", self.profile)
+        require_nonempty_string("runtime_fingerprint", self.runtime_fingerprint)
         if not isinstance(self.workspace, WorkspaceRef):
             raise ValueError("workspace must be a WorkspaceRef")
         if not isinstance(self.outputs, Outputs):
             raise ValueError("outputs must be an Outputs")
         if not isinstance(self.omp_sessions, Mapping):
             raise ValueError("omp_sessions must be a mapping")
-        sessions = {}
         for session_name, session_state in self.omp_sessions.items():
-            _require_identifier("omp session name", session_name)
+            require_nonempty_string("omp session name", session_name)
             if not isinstance(session_state, OmpSessionState):
                 raise ValueError("omp_sessions values must be OmpSessionState values")
-            sessions[session_name] = session_state
         if not isinstance(self.execution, Execution):
             raise ValueError("execution must be an Execution")
-        object.__setattr__(self, "omp_sessions", MappingProxyType(sessions))
+        object.__setattr__(self, "omp_sessions", MappingProxyType(dict(self.omp_sessions)))
 
     def with_workspace_asset_id(self, asset_id: str | None) -> "SandboxManifest":
         """Return this manifest bound to a durable workspace asset."""
@@ -213,35 +182,18 @@ def to_yaml(manifest: SandboxManifest) -> str:
     return yaml.safe_dump(manifest_to_dict(manifest), sort_keys=False)
 
 
-def _require_mapping(value: object, context: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{context} must be a mapping")
-    return value
-
-
-def _require_exact_fields(value: object, fields: frozenset[str], context: str) -> Mapping[str, Any]:
-    mapping = _require_mapping(value, context)
-    missing = fields - mapping.keys()
-    if missing:
-        raise ValueError(f"{context} missing required field {sorted(missing)[0]!r}")
-    unknown = mapping.keys() - fields
-    if unknown:
-        raise ValueError(f"{context} has unsupported field {sorted(unknown, key=repr)[0]!r}")
-    return mapping
-
-
 def _dict_to_workspace_ref(value: object) -> WorkspaceRef:
-    data = _require_exact_fields(value, frozenset({"snapshot_asset_id", "sha256"}), "workspace")
+    data = require_exact_fields(value, frozenset({"snapshot_asset_id", "sha256"}), "workspace")
     return WorkspaceRef(snapshot_asset_id=data["snapshot_asset_id"], sha256=data["sha256"])
 
 
 def _dict_to_artifact(value: object) -> Artifact:
-    data = _require_exact_fields(value, frozenset({"asset_id", "mime_type"}), "artifact")
+    data = require_exact_fields(value, frozenset({"asset_id", "mime_type"}), "artifact")
     return Artifact(asset_id=data["asset_id"], mime_type=data["mime_type"])
 
 
 def _dict_to_outputs(value: object) -> Outputs:
-    data = _require_exact_fields(value, frozenset({"events_asset_id", "artifacts"}), "outputs")
+    data = require_exact_fields(value, frozenset({"events_asset_id", "artifacts"}), "outputs")
     artifacts_data = data["artifacts"]
     if not isinstance(artifacts_data, list):
         raise ValueError("outputs.artifacts must be a list")
@@ -252,25 +204,19 @@ def _dict_to_outputs(value: object) -> Outputs:
 
 
 def _dict_to_omp_session_state(value: object) -> OmpSessionState:
-    data = _require_exact_fields(value, frozenset({"session_id", "state_asset_id"}), "omp session")
+    data = require_exact_fields(value, frozenset({"session_id", "state_asset_id"}), "omp session")
     return OmpSessionState(session_id=data["session_id"], state_asset_id=data["state_asset_id"])
 
 
 def _dict_to_execution(value: object) -> Execution:
-    data = _require_exact_fields(value, frozenset({"run_id", "status", "exit_code", "created_at"}), "execution")
-    return Execution(
-        run_id=data["run_id"],
-        status=data["status"],
-        exit_code=data["exit_code"],
-        created_at=data["created_at"],
-    )
+    data = require_exact_fields(value, frozenset({"run_id", "status", "exit_code", "created_at"}), "execution")
+    return Execution(run_id=data["run_id"], status=data["status"], exit_code=data["exit_code"], created_at=data["created_at"])
 
 
 def manifest_from_dict(value: object) -> SandboxManifest:
     """Decode and strictly validate a storage-neutral manifest mapping."""
-    root = _require_exact_fields(value, _MANIFEST_FIELDS, "manifest root")
-    sessions_data = _require_mapping(root["omp_sessions"], "omp_sessions")
-    sessions = {name: _dict_to_omp_session_state(state) for name, state in sessions_data.items()}
+    root = require_exact_fields(value, _MANIFEST_FIELDS, "manifest root")
+    sessions_data = require_mapping(root["omp_sessions"], "omp_sessions")
     return SandboxManifest(
         schema_version=root["schema_version"],
         manifest_id=root["manifest_id"],
@@ -278,7 +224,7 @@ def manifest_from_dict(value: object) -> SandboxManifest:
         runtime_fingerprint=root["runtime_fingerprint"],
         workspace=_dict_to_workspace_ref(root["workspace"]),
         outputs=_dict_to_outputs(root["outputs"]),
-        omp_sessions=sessions,
+        omp_sessions={name: _dict_to_omp_session_state(state) for name, state in sessions_data.items()},
         execution=_dict_to_execution(root["execution"]),
     )
 
@@ -288,7 +234,7 @@ def from_yaml(text: str) -> SandboxManifest:
     if not isinstance(text, str):
         raise ValueError("Manifest YAML must be text")
     try:
-        data = yaml.load(text, Loader=_UniqueKeyLoader)
+        data = load_strict_yaml(text)
     except yaml.YAMLError as error:
         raise ValueError(f"Manifest YAML is invalid: {error}") from error
     return manifest_from_dict(data)

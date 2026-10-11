@@ -5,15 +5,16 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import tarfile
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
+from agent_sandbox import OmpTask, SandboxRun, WorkspaceArchive
 from agent_sandbox.cli import main
 from agent_sandbox.doctor import CheckResult
 from agent_sandbox.manifest import Execution, OmpSessionState, Outputs, SandboxManifest, WorkspaceRef, manifest_to_dict
-from agent_sandbox.outputs import ErrorEvent, StreamEvent
+from agent_sandbox.omp import ErrorEvent, StreamEvent
 
 
 def _manifest(run_id: str = "next-run", sha256: str = "a" * 64) -> SandboxManifest:
@@ -29,230 +30,170 @@ def _manifest(run_id: str = "next-run", sha256: str = "a" * 64) -> SandboxManife
     )
 
 
-def _run(capture_path: str, status: str = "completed") -> SimpleNamespace:
-    return SimpleNamespace(
+def _run(capture: Path, on_release: MagicMock, status: str = "completed", outputs: tuple = ()) -> SandboxRun:
+    capture.write_bytes(b"captured workspace")
+    return SandboxRun(
         status=status,
         summary=f"[{status}] concise summary",
         next_manifest=_manifest(),
-        outputs=(StreamEvent(name="stdout", text="result\n"),),
-        capture_path=capture_path,
-        release=MagicMock(),
+        outputs=outputs or (StreamEvent(name="stdout", text="result\n"),),
+        workspace_changed=True,
+        workspace=WorkspaceArchive(str(capture), "a" * 64),
+        _on_release=on_release,
     )
 
 
-class TestDoctorCommand(unittest.TestCase):
-    """Exercise the doctor subcommand without Docker."""
+def _write_tar(path: Path) -> str:
+    with tarfile.open(path, "w") as archive:
+        member = tarfile.TarInfo("file.txt")
+        member.size = 2
+        archive.addfile(member, io.BytesIO(b"ok"))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
+
+class TestDoctorCommand(unittest.TestCase):
     @patch("agent_sandbox.cli.run_doctor")
-    def test_exits_zero_and_reports_successful_checks(self, run_doctor) -> None:
-        run_doctor.return_value = [CheckResult("rootless-docker", True, "rootless mode enabled")]
+    def test_exits_zero_and_reports_successful_checks(self, run_doctor: MagicMock) -> None:
+        run_doctor.return_value = [CheckResult("docker-environment", True, "ready")]
 
         stdout = io.StringIO()
         with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout):
             main(["doctor", "--profile", "gigachad"])
 
         self.assertEqual(raised.exception.code, 0)
-        self.assertEqual(stdout.getvalue(), "[OK  ] rootless-docker: rootless mode enabled\n\nAll checks passed.\n")
+        self.assertEqual(stdout.getvalue(), "[OK  ] docker-environment: ready\n\nAll checks passed.\n")
 
     @patch("agent_sandbox.cli.run_doctor")
-    def test_exits_one_and_reports_failed_checks(self, run_doctor) -> None:
-        run_doctor.return_value = [
-            CheckResult("rootless-docker", True, "rootless mode enabled"),
-            CheckResult("gvisor-runsc", False, "runsc missing"),
-        ]
+    def test_exits_one_and_reports_failed_checks(self, run_doctor: MagicMock) -> None:
+        run_doctor.return_value = [CheckResult("docker-environment", True, "ready"), CheckResult("omp-binary", False, "missing")]
 
-        stdout = io.StringIO()
-        stderr = io.StringIO()
+        stdout, stderr = io.StringIO(), io.StringIO()
         with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
             main(["doctor", "--profile", "gigachad"])
 
         self.assertEqual(raised.exception.code, 1)
-        self.assertEqual(
-            stdout.getvalue(),
-            "[OK  ] rootless-docker: rootless mode enabled\n[FAIL] gvisor-runsc: runsc missing\n",
-        )
+        self.assertEqual(stdout.getvalue(), "[OK  ] docker-environment: ready\n[FAIL] omp-binary: missing\n")
         self.assertEqual(stderr.getvalue(), "\n1 check(s) failed.\n")
 
 
+@patch("agent_sandbox.cli.Sandbox")
 class TestOmpCommand(unittest.TestCase):
-    """Exercise OMP orchestration without starting Docker."""
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.workspace_out = self.root / "out.tar"
+        self.manifest_out = self.root / "next.json"
+        self.release = MagicMock()
 
-    @patch("agent_sandbox.cli.Sandbox")
-    def test_fresh_run_hashes_workspace_and_persists_outputs(self, sandbox: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            workspace_in = root / "initial.tar"
-            workspace_in.write_bytes(b"initial workspace")
-            capture = root / "capture.tar"
-            capture.write_bytes(b"captured workspace")
-            workspace_out = root / "out.tar"
-            manifest_out = root / "manifest.json"
-            result = _run(str(capture))
-            sandbox.return_value.run.return_value = result
+    def _main(self, *args: str) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        argv = [
+            "omp",
+            *args,
+            "--profile",
+            "gigachad",
+            "--workspace-out",
+            str(self.workspace_out),
+            "--manifest-out",
+            str(self.manifest_out),
+        ]
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
+            main(argv)
+        return raised.exception.code, stdout.getvalue(), stderr.getvalue()
 
-            def release_after_persist() -> None:
-                self.assertEqual(workspace_out.read_bytes(), b"captured workspace")
-                self.assertEqual(json.loads(manifest_out.read_text()), manifest_to_dict(result.next_manifest))
+    def test_fresh_run_pins_workspace_persists_outputs_then_releases(self, sandbox: MagicMock) -> None:
+        workspace_in = self.root / "initial.tar"
+        workspace_sha = _write_tar(workspace_in)
+        result = _run(self.root / "capture.tar", self.release)
+        sandbox.return_value.run.return_value = result
 
-            result.release.side_effect = release_after_persist
+        def release_after_persist() -> None:
+            self.assertEqual(self.workspace_out.read_bytes(), b"captured workspace")
+            self.assertEqual(json.loads(self.manifest_out.read_text()), manifest_to_dict(result.next_manifest))
 
-            stdout = io.StringIO()
-            with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout):
-                main(
-                    [
-                        "omp",
-                        "do work",
-                        "--profile",
-                        "gigachad",
-                        "--workspace-in",
-                        str(workspace_in),
-                        "--workspace-out",
-                        str(workspace_out),
-                        "--manifest-out",
-                        str(manifest_out),
-                        "--run-id",
-                        "fresh-run",
-                        "--model",
-                        "model-x",
-                        "--thinking",
-                        "high",
-                        "--append-system",
-                        "be concise",
-                        "--lean",
-                    ]
-                )
+        self.release.side_effect = release_after_persist
 
-            self.assertEqual(raised.exception.code, 0)
-            invocation = sandbox.return_value.run.call_args.args[0]
-            self.assertEqual(invocation.slot_key, "cli")
-            self.assertEqual(invocation.workspace_archive_path, str(workspace_in))
-            self.assertEqual(invocation.workspace_archive_sha256, hashlib.sha256(b"initial workspace").hexdigest())
-            self.assertIsNone(invocation.active_manifest)
-            self.assertEqual(
-                (invocation.run_id, invocation.model, invocation.thinking, invocation.append_system, invocation.lean),
-                ("fresh-run", "model-x", "high", "be concise", True),
-            )
-            self.assertEqual(workspace_out.read_bytes(), b"captured workspace")
-            self.assertEqual(json.loads(manifest_out.read_text()), manifest_to_dict(result.next_manifest))
-            self.assertEqual(
-                stdout.getvalue(),
-                'status: completed\nsummary: [completed] concise summary\n'
-                '[{"name":"stdout","text":"result\\n","type":"StreamEvent"}]\n',
-            )
-            result.release.assert_called_once_with()
+        code, stdout, _stderr = self._main(
+            "do work",
+            "--workspace-in",
+            str(workspace_in),
+            "--run-id",
+            "fresh-run",
+            "--model",
+            "model-x",
+            "--thinking",
+            "high",
+            "--append-system",
+            "be concise",
+            "--lean",
+        )
 
-    @patch("agent_sandbox.cli.Sandbox")
-    def test_resumed_run_passes_strict_manifest_without_rehashing(self, sandbox: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            workspace_in = root / "prior.tar"
-            workspace_in.write_bytes(b"prior workspace")
-            manifest_in = root / "prior.json"
-            prior = _manifest(run_id="prior-run", sha256="c" * 64)
-            manifest_in.write_text(json.dumps(manifest_to_dict(prior)))
-            capture = root / "capture.tar"
-            capture.write_bytes(b"new workspace")
-            result = _run(str(capture))
-            sandbox.return_value.run.return_value = result
+        self.assertEqual(code, 0)
+        invocation = sandbox.return_value.run.call_args.args[0]
+        self.assertEqual((invocation.slot_key, invocation.run_id), ("cli", "fresh-run"))
+        self.assertEqual(invocation.workspace, WorkspaceArchive(str(workspace_in), workspace_sha))
+        self.assertIsNone(invocation.active_manifest)
+        self.assertEqual(invocation.task, OmpTask("do work", model="model-x", thinking="high", append_system="be concise", lean=True))
+        self.assertEqual(
+            stdout,
+            'status: completed\nsummary: [completed] concise summary\n[{"name":"stdout","text":"result\\n","type":"StreamEvent"}]\n',
+        )
+        self.release.assert_called_once_with()
+        self.assertFalse(Path(result.workspace.path).exists())
 
-            with self.assertRaises(SystemExit) as raised, redirect_stdout(io.StringIO()):
-                main(
-                    [
-                        "omp",
-                        "continue work",
-                        "--profile",
-                        "gigachad",
-                        "--workspace-in",
-                        str(workspace_in),
-                        "--manifest-in",
-                        str(manifest_in),
-                        "--workspace-out",
-                        str(root / "out.tar"),
-                        "--manifest-out",
-                        str(root / "next.json"),
-                    ]
-                )
+    def test_resumed_run_passes_the_manifest_with_its_matching_workspace(self, sandbox: MagicMock) -> None:
+        workspace_in = self.root / "prior.tar"
+        prior = _manifest(run_id="prior-run", sha256=_write_tar(workspace_in))
+        manifest_in = self.root / "prior.json"
+        manifest_in.write_text(json.dumps(manifest_to_dict(prior)))
+        sandbox.return_value.run.return_value = _run(self.root / "capture.tar", self.release)
 
-            self.assertEqual(raised.exception.code, 0)
-            invocation = sandbox.return_value.run.call_args.args[0]
-            self.assertEqual(invocation.active_manifest, prior)
-            self.assertEqual(invocation.workspace_archive_path, str(workspace_in))
-            self.assertIsNone(invocation.workspace_archive_sha256)
-            result.release.assert_called_once_with()
+        code, _stdout, _stderr = self._main("continue work", "--workspace-in", str(workspace_in), "--manifest-in", str(manifest_in))
 
-    @patch("agent_sandbox.cli.Sandbox")
+        self.assertEqual(code, 0)
+        invocation = sandbox.return_value.run.call_args.args[0]
+        self.assertEqual(invocation.active_manifest, prior)
+        self.assertEqual(invocation.workspace.path, str(workspace_in))
+
     def test_failed_run_exits_one_after_persisting_outputs(self, sandbox: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            capture = root / "capture.tar"
-            capture.write_bytes(b"failed workspace")
-            result = _run(str(capture), status="failed")
-            result.outputs = (ErrorEvent(ename="OMPExecutionError", evalue="omp exited with code 1"),)
-            sandbox.return_value.run.return_value = result
-            workspace_out = root / "out.tar"
-            manifest_out = root / "next.json"
+        outputs = (ErrorEvent(ename="OMPExecutionError", evalue="omp exited with code 1"),)
+        sandbox.return_value.run.return_value = _run(self.root / "capture.tar", self.release, status="failed", outputs=outputs)
 
-            with self.assertRaises(SystemExit) as raised, redirect_stdout(io.StringIO()):
-                main(
-                    [
-                        "omp",
-                        "do work",
-                        "--profile",
-                        "gigachad",
-                        "--workspace-out",
-                        str(workspace_out),
-                        "--manifest-out",
-                        str(manifest_out),
-                    ]
-                )
+        code, _stdout, _stderr = self._main("do work")
 
-            self.assertEqual(raised.exception.code, 1)
-            self.assertEqual(workspace_out.read_bytes(), b"failed workspace")
-            self.assertEqual(json.loads(manifest_out.read_text()), manifest_to_dict(result.next_manifest))
-            result.release.assert_called_once_with()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.workspace_out.read_bytes(), b"captured workspace")
+        self.release.assert_called_once_with()
 
-    @patch("agent_sandbox.cli.Sandbox")
-    def test_manifest_input_requires_workspace_input(self, sandbox: MagicMock) -> None:
-        with self.assertRaises(SystemExit) as raised, redirect_stderr(io.StringIO()):
-            main(
-                [
-                    "omp",
-                    "do work",
-                    "--profile",
-                    "gigachad",
-                    "--manifest-in",
-                    "prior.json",
-                    "--workspace-out",
-                    "out.tar",
-                    "--manifest-out",
-                    "next.json",
-                ]
-            )
+    def test_invalid_inputs_exit_two_without_running(self, sandbox: MagicMock) -> None:
+        manifest_in = self.root / "prior.json"
+        manifest_in.write_text(json.dumps(manifest_to_dict(_manifest())))
+        unsafe_tar = self.root / "unsafe.tar"
+        with tarfile.open(unsafe_tar, "w") as archive:
+            archive.addfile(tarfile.TarInfo("../escape"))
 
-        self.assertEqual(raised.exception.code, 2)
-        sandbox.assert_not_called()
+        for args, message in (
+            (("--manifest-in", str(manifest_in)), "active_manifest requires workspace"),
+            (("--workspace-in", str(unsafe_tar)), "unsafe member path"),
+            (("--workspace-in", str(self.root / "missing.tar")), "Refusing workspace archive"),
+        ):
+            with self.subTest(message=message):
+                code, _stdout, stderr = self._main("do work", *args)
+                self.assertEqual(code, 2)
+                self.assertIn(message, stderr)
+        sandbox.return_value.run.assert_not_called()
 
-    @patch("agent_sandbox.cli.shutil.copyfile", side_effect=OSError("write failed"))
-    @patch("agent_sandbox.cli.Sandbox")
-    def test_releases_run_when_workspace_write_fails(self, sandbox: MagicMock, copyfile: MagicMock) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            result = _run(str(root / "capture.tar"))
-            sandbox.return_value.run.return_value = result
+    def test_releases_run_when_workspace_write_fails(self, sandbox: MagicMock) -> None:
+        sandbox.return_value.run.return_value = _run(self.root / "capture.tar", self.release)
 
-            with self.assertRaisesRegex(OSError, "write failed"):
-                main(
-                    [
-                        "omp",
-                        "do work",
-                        "--profile",
-                        "gigachad",
-                        "--workspace-out",
-                        str(root / "out.tar"),
-                        "--manifest-out",
-                        str(root / "next.json"),
-                    ]
-                )
+        with patch("agent_sandbox.cli.shutil.copyfile", side_effect=OSError("write failed")):
+            code, _stdout, stderr = self._main("do work")
 
-            copyfile.assert_called_once_with(str(root / "capture.tar"), str(root / "out.tar"))
-            result.release.assert_called_once_with()
+        self.assertEqual(code, 2)
+        self.assertIn("write failed", stderr)
+        self.release.assert_called_once_with()
+
+
+if __name__ == "__main__":
+    unittest.main()

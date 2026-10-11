@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import yaml
 
-from agent_sandbox.profile import Mount, Profile, ProfileError, WorkspaceConfig, load_profile
+from agent_sandbox.profile import Mount, Profile, ProfileError, load_profile
 
 
 def _profile_data(name: str = "test_profile") -> dict:
@@ -17,7 +17,6 @@ def _profile_data(name: str = "test_profile") -> dict:
         "image": "test:image",
         "workdir": "/workspace",
         "mounts": [],
-        "workspace": {"mode": "managed"},
         "omp_binary": "/usr/local/bin/omp",
     }
 
@@ -49,7 +48,7 @@ class TestProfileLoading(unittest.TestCase):
         self.assertIn("OPENAI_API_KEY", profile.env_passthrough)
         self.assertIn("/root/.omp", [mount.target for mount in profile.mounts])
         self.assertNotIn("/home/sandbox/.omp", [mount.target for mount in profile.mounts])
-        self.assertEqual(profile.host_services, (("OLLAMA_HOST", 11434),))
+        self.assertEqual(dict(profile.host_services), {"OLLAMA_HOST": 11434})
         self.assertRegex(profile.runtime_fingerprint, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(profile.runtime_fingerprint, load_profile("gigachad").runtime_fingerprint)
 
@@ -65,12 +64,12 @@ class TestProfileLoading(unittest.TestCase):
 
         self.assertEqual(profile.image, "first:image")
 
-    def test_optional_profile_collections_default_to_empty_tuples(self) -> None:
+    def test_optional_profile_collections_default_to_empty(self) -> None:
         profile = self._load(_profile_data())
 
-        self.assertEqual(profile.python_interpreters, ())
+        self.assertEqual(dict(profile.python_interpreters), {})
         self.assertEqual(profile.env_passthrough, ())
-        self.assertEqual(profile.host_services, ())
+        self.assertEqual(dict(profile.host_services), {})
 
     def test_rejects_unsafe_profile_names_before_file_lookup(self) -> None:
         for name in ("", "../gigachad", "gigachad.yaml", "name/child"):
@@ -83,7 +82,7 @@ class TestProfileLoading(unittest.TestCase):
             (lambda data: data.update({"image": ""}), "image must be a nonempty string"),
             (lambda data: data.update({"workdir": "workspace"}), "workdir must be an absolute path"),
             (lambda data: data.update({"omp_binary": "/usr/local/../bin/omp"}), "omp_binary must be an absolute path"),
-            (lambda data: data.update({"workspace": {"mode": "host"}}), "workspace mode must be 'managed'"),
+            (lambda data: data.update({"workspace": {"mode": "managed"}}), "unsupported field 'workspace'"),
         )
         for mutate, error in cases:
             with self.subTest(error=error):
@@ -145,7 +144,6 @@ name: duplicate
 image: test:image
 workdir: /workspace
 mounts: []
-workspace: {mode: managed}
 omp_binary: /usr/local/bin/omp
 """
         with self.assertRaisesRegex(ProfileError, "duplicate key"):
@@ -157,37 +155,35 @@ omp_binary: /usr/local/bin/omp
             image="test:image",
             workdir="/workspace",
             mounts=(Mount("/host/a", "/opt/a", "ro"), Mount("/host/b", "/opt/b", "rw")),
-            workspace=WorkspaceConfig("managed"),
             omp_binary="/usr/local/bin/omp",
-            python_interpreters=(("venv", "/opt/venv/bin/python"),),
+            python_interpreters={"venv": "/opt/venv/bin/python", "base": "/opt/base/python"},
             env_passthrough=("OPENAI_API_KEY", "TAVILY_API_KEY"),
-            host_services=(("OLLAMA_HOST", 11434),),
+            host_services={"OLLAMA_HOST": 11434, "SERVICE_HOST": 8080},
         )
         variants = (
             replace(profile, name="other_profile"),
             replace(profile, image="other:image"),
             replace(profile, workdir="/project"),
             replace(profile, mounts=(Mount("/host/c", "/opt/c", "ro"),)),
-            replace(profile, workspace=WorkspaceConfig("other")),
             replace(profile, omp_binary="/opt/omp"),
-            replace(profile, python_interpreters=(("base", "/opt/base/python"),)),
+            replace(profile, python_interpreters={"base": "/opt/base/python"}),
             replace(profile, env_passthrough=("GEMINI_API_KEY",)),
-            replace(profile, host_services=(("SERVICE_HOST", 8080),)),
+            replace(profile, host_services={"SERVICE_HOST": 8080}),
         )
 
         fingerprint = profile.runtime_fingerprint
-        self.assertEqual(len({fingerprint, *(item.runtime_fingerprint for item in variants)}), 10)
+        self.assertEqual(len({fingerprint, *(item.runtime_fingerprint for item in variants)}), 9)
         reordered = replace(
             profile,
             mounts=tuple(reversed(profile.mounts)),
-            python_interpreters=tuple(reversed(profile.python_interpreters)),
+            python_interpreters=dict(reversed(profile.python_interpreters.items())),
             env_passthrough=tuple(reversed(profile.env_passthrough)),
-            host_services=tuple(reversed(profile.host_services)),
+            host_services=dict(reversed(profile.host_services.items())),
         )
         self.assertEqual(reordered.runtime_fingerprint, fingerprint)
         with patch.dict(os.environ, {"OPENAI_API_KEY": "secret-value-that-must-not-affect-the-fingerprint"}):
             self.assertEqual(profile.runtime_fingerprint, fingerprint)
-        with patch("agent_sandbox.profile.RUNTIME_POLICY_DESCRIPTOR", "agent-sandbox-runtime-policy-v5"):
+        with patch("agent_sandbox.profile.RUNTIME_POLICY_DESCRIPTOR", "agent-sandbox-runtime-policy-v6"):
             self.assertNotEqual(replace(profile).runtime_fingerprint, fingerprint)
 
 

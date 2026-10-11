@@ -18,8 +18,6 @@ mounts:
   - source: /home/noob/.agents/AGENTS.md
     target: /workspace/AGENTS.md
     mode: ro
-workspace:
-  mode: managed
 omp_binary: /usr/local/bin/omp
 python_interpreters:
   venv: /home/noob/git/gigachad-bot/.venv/bin/python3

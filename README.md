@@ -105,37 +105,37 @@ HOST_SERVICE_PORTS="11434 8080" ./scripts/setup_host_services.sh
 
 Profiles mount the OMP executable itself, not a launcher. A wrapper such as a `mise` shim fails inside the image. With mise, mount `~/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp`, which follows upgrades.
 
-Doctor exits `0` only when every check passes. It checks the profile, Docker connection, rootless mode, registered `runsc`, required cgroup bypass, image, and declared mount sources. It then starts one container before checking OMP, Python interpreters, `AGENTS.md`, and declared host services.
+Doctor exits `0` only when every check passes. It runs in stages and stops after the first stage with a failure: Docker environment (rootless mode, registered `runsc`, profile image) with the required cgroup bypass, then declared mount sources, then one `runsc` container start, then OMP, Python interpreters, `AGENTS.md`, and declared host services.
 
 ### 2. Run a managed OMP invocation
 
 The caller supplies stable request identity and, where needed, a workspace archive it has already downloaded. The caller uploads the returned capture and persists the returned manifest.
 
 ```python
-from agent_sandbox import Sandbox, SandboxInvocation
+from agent_sandbox import OmpTask, Sandbox, SandboxInvocation
 
 sandbox = Sandbox(namespace="tenant-a")
 invocation = SandboxInvocation(
     slot_key="workspace-42",
-    run_id="request-2026-09-19-01",
     profile_name="gigachad",
-    prompt="Summarize the current workspace.",
-    workspace_archive_path=None,
-    active_manifest=None,
+    run_id="request-2026-09-19-01",
+    task=OmpTask("Summarize the current workspace.", model="provider/model", lean=True),
 )
 
 with sandbox.run(invocation) as result:
-    upload_capture(result.capture_path)
+    upload_capture(result.workspace.path, result.workspace.sha256)
     persist_manifest(result.next_manifest)
     print(result.status, result.summary)
     print(result.outputs)
 ```
 
-`slot_key` and `run_id` provide in-process idempotency within one `Sandbox` instance. Releasing the returned `SandboxRun`, either explicitly or through the context manager, removes its local capture and evicts that cached result.
+`OmpTask` carries the prompt and its per-run options: `prompt_images` (a tuple of `PromptImage`), `model`, `thinking`, `append_system`, and `lean`. `slot_key` and `run_id` provide in-process idempotency within one `Sandbox` instance. Releasing the returned `SandboxRun`, either explicitly or through the context manager, removes its local capture and evicts that cached result.
 
-For a resumed workspace, provide both the prior manifest and the caller-downloaded archive. For a first invocation with an archive, also provide its lowercase 64-character SHA-256 as `workspace_archive_sha256`.
+To restore a workspace, pass `workspace=WorkspaceArchive(path, sha256)` for the caller-downloaded archive. `WorkspaceArchive.from_file(path)` validates a local archive and pins its current digest. To resume the OMP session as well, also pass the prior manifest as `active_manifest`. Its workspace digest must match the archive, and its runtime fingerprint must match the current profile and image.
 
-The returned manifest is storage-neutral and the capture is a local temporary artifact. While the run is retained, `SandboxRun.read_workspace_file()` safely validates the capture and reads one bounded regular workspace file, such as `plot.json`. Call `release()` only after the caller has persisted the data it needs.
+The returned manifest is storage-neutral and `result.workspace` is a local temporary archive. While the run is retained, `SandboxRun.read_workspace_file()` safely validates the capture and reads one bounded regular workspace file, such as `plot.json`. Call `release()` only after the caller has persisted the data it needs.
+
+Every caller-facing failure is an `AgentSandboxError`: `ProfileError`, `SecurityEnvironmentError`, `ContainerRuntimeError`, `ArchiveError`, or `PythonScriptError`. Invalid invocation inputs raise `ValueError` or `TypeError` at construction.
 
 ### 3. Run OMP through the standalone wrapper
 
@@ -163,16 +163,16 @@ agent-sandbox omp "Continue the workspace." \
   --manifest-out artifacts/next-manifest.json
 ```
 
-The command persists the returned capture and JSON manifest before releasing the local run. It prints `status`, `summary`, and serialized output events. A returned status other than `completed` exits with code `1` after those files are written.
+The command persists the returned capture and JSON manifest before releasing the local run. It prints `status`, `summary`, and serialized output events. A returned status other than `completed` exits with code `1` after those files are written. Invalid inputs and sandbox failures exit with code `2` and a one-line error.
 
 ### 4. Run a small isolated Python task
 
 Choose a profile-defined interpreter label, never a host interpreter path.
 
 ```python
-from agent_sandbox import run_python_script
+from agent_sandbox import Sandbox
 
-output = run_python_script(
+output = Sandbox().run_python_script(
     "venv",
     "print('hello from the sandbox')",
     timeout=30,
@@ -200,8 +200,6 @@ mounts:
   - source: /absolute/host/path/to/project-instructions
     target: /workspace/AGENTS.md
     mode: ro
-workspace:
-  mode: managed
 omp_binary: /usr/local/bin/omp
 python_interpreters:
   venv: /opt/example-venv/bin/python3
@@ -211,7 +209,7 @@ host_services:
   OLLAMA_HOST: 11434
 ```
 
-Required fields are `name`, `image`, `workdir`, `mounts`, `workspace`, and `omp_binary`. Optional fields are `python_interpreters`, `env_passthrough`, and `host_services`.
+Required fields are `name`, `image`, `workdir`, `mounts`, and `omp_binary`. Optional fields are `python_interpreters`, `env_passthrough`, and `host_services`.
 
 Profile validation rejects duplicate YAML keys, unknown fields, unsafe names, non-absolute paths, conflicting mount targets, mounts into runtime-owned paths, invalid environment names, and invalid host-service ports. The runtime fingerprint combines the validated profile, static runtime policy, and Docker-resolved image ID. A changed profile or image prevents restoration from a prior manifest.
 
@@ -226,8 +224,8 @@ Profile validation rejects duplicate YAML keys, unknown fields, unsafe names, no
 | Managed OMP timeout | 300 seconds |
 | Prompt-image payload | 32 MiB combined |
 | Retained OMP output | 4 MiB combined |
-| Workspace restore archive | 512 MiB |
-| Workspace capture archive | 512 MiB |
+| Workspace restore and capture archive | 512 MiB |
+| `append_system` text | 64 KiB |
 | `/runtime` tmpfs | 1 GiB |
 | `/tmp` tmpfs | 64 MiB |
 | Container CPU, memory, and PIDs | Unbounded by this project |

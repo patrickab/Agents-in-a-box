@@ -1,16 +1,23 @@
 """Run the agent-sandbox command-line interface."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import shutil
 import sys
 import uuid
 
-from agent_sandbox import Sandbox, SandboxInvocation, manifest_from_dict, manifest_to_dict
+from agent_sandbox import (
+    AgentSandboxError,
+    OmpTask,
+    Sandbox,
+    SandboxInvocation,
+    WorkspaceArchive,
+    manifest_from_dict,
+    manifest_to_dict,
+)
 from agent_sandbox.doctor import run_doctor
-from agent_sandbox.outputs import serialize_events
+from agent_sandbox.omp import serialize_events
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -26,55 +33,33 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
-def _sha256_file(path: str) -> str:
-    """Return the lowercase SHA-256 digest for a file."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as source:
-        while chunk := source.read(64 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _load_manifest(path: str):
-    """Load one strictly validated JSON manifest."""
-    with open(path, encoding="utf-8") as source:
-        return manifest_from_dict(json.load(source))
-
-
 def _require_output_parent(path: str) -> None:
-    """Require an existing parent directory for an output path."""
     parent = Path(path).parent
     if not parent.is_dir():
         raise ValueError(f"output parent directory does not exist: {parent}")
 
 
 def _cmd_omp(args: argparse.Namespace) -> int:
-    """Run OMP through the native sandbox seam and persist its result."""
+    """Run OMP through the sandbox and persist its workspace, manifest, and events."""
     _require_output_parent(args.workspace_out)
     _require_output_parent(args.manifest_out)
-    active_manifest = _load_manifest(args.manifest_in) if args.manifest_in else None
-    workspace_sha256 = _sha256_file(args.workspace_in) if args.workspace_in and not active_manifest else None
+    active_manifest = None
+    if args.manifest_in:
+        with open(args.manifest_in, encoding="utf-8") as source:
+            active_manifest = manifest_from_dict(json.load(source))
     invocation = SandboxInvocation(
         slot_key=args.slot_key,
         profile_name=args.profile,
-        prompt=args.prompt,
         run_id=args.run_id,
+        task=OmpTask(args.prompt, model=args.model, thinking=args.thinking, append_system=args.append_system, lean=args.lean),
         active_manifest=active_manifest,
-        workspace_archive_path=args.workspace_in,
-        workspace_archive_sha256=workspace_sha256,
-        model=args.model,
-        thinking=args.thinking,
-        append_system=args.append_system,
-        lean=args.lean,
+        workspace=WorkspaceArchive.from_file(args.workspace_in) if args.workspace_in else None,
     )
-    result = Sandbox().run(invocation)
-    try:
-        shutil.copyfile(result.capture_path, args.workspace_out)
+    with Sandbox().run(invocation) as result:
+        shutil.copyfile(result.workspace.path, args.workspace_out)
         with open(args.manifest_out, "w", encoding="utf-8") as target:
             json.dump(manifest_to_dict(result.next_manifest), target, indent=2)
             target.write("\n")
-    finally:
-        result.release()
     print(f"status: {result.status}")
     print(f"summary: {result.summary}")
     print(json.dumps(serialize_events(result.outputs), separators=(",", ":")))
@@ -105,9 +90,11 @@ def main(argv: list[str] | None = None) -> None:
     omp_parser.set_defaults(func=_cmd_omp)
 
     args = parser.parse_args(argv)
-    if args.command == "omp" and args.manifest_in and not args.workspace_in:
-        parser.error("omp: --manifest-in requires --workspace-in")
-    sys.exit(args.func(args))
+    try:
+        code = args.func(args)
+    except (OSError, ValueError, AgentSandboxError) as error:
+        parser.exit(2, f"{parser.prog} {args.command}: error: {error}\n")
+    sys.exit(code)
 
 
 if __name__ == "__main__":

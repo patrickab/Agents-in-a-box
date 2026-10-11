@@ -1,125 +1,90 @@
-"""Run profiled OMP work in short-lived rootless Docker containers.
+"""Run profiled OMP work in short-lived rootless Docker/gVisor containers.
 
-Every managed execution gets a new named container solely so a namespace can
-serialize and clean up a crashed predecessor.  Workspace continuity is carried
-only by caller-supplied verified archives; neither a Docker volume nor an OMP
-state marker survives a transaction.
+Every managed execution gets a fresh named container solely so a namespace can
+serialize and clean up a crashed predecessor. Workspace continuity is carried
+only by caller-supplied verified archives; nothing survives a transaction inside Docker.
 """
 
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 import fcntl
 import hashlib
 import math
 import os
 from pathlib import PurePosixPath
-import posixpath
-import tarfile
 import tempfile
 import threading
 
+from docker.models.containers import Container
 from docker.types import Mount as DockerMount
 
+from agent_sandbox.archive import WorkspaceArchive, verify_archive
 from agent_sandbox.config import (
     DOCKER_HOST,
     HOST_SERVICE_ADDRESS,
     MANAGED_OMP_TIMEOUT_SECONDS,
-    MAX_CAPTURED_WORKSPACE_BYTES,
-    MAX_PROMPT_IMAGE_BYTES,
-    MAX_RESTORE_ARCHIVE_BYTES,
     MAX_RETAINED_OUTPUT_BYTES,
+    MAX_WORKSPACE_ARCHIVE_BYTES,
     RUNTIME_TMPFS_SIZE,
     TMP_TMPFS_SIZE,
     RuntimeResourceNames,
     runtime_resource_names,
 )
-from agent_sandbox.omp_runner import build_omp_argv
-from agent_sandbox.profile import Profile, load_profile
+from agent_sandbox.errors import (
+    AgentSandboxError,
+    ArchiveError,
+    ContainerRuntimeError,
+    PythonScriptError,
+    SecurityEnvironmentError,
+)
+from agent_sandbox.omp import OmpTask, build_omp_argv
+from agent_sandbox.profile import Profile
 import docker
 
-_DEFAULT_OUTPUT_LIMIT = object()
-
 INTERNAL_WORKDIR = "/runtime/active"
+_SESSION_DIR = f"{INTERNAL_WORKDIR}/.omp-session"
 _PROMPT_IMAGES_DIR = "/runtime/prompt-images"
 _APPEND_SYSTEM_DIR = "/runtime/append-system"
 _APPEND_SYSTEM_PATH = f"{_APPEND_SYSTEM_DIR}/APPEND_SYSTEM.md"
 _OMP_HOME = "/runtime/omp-home"
 _RESTORE_ARCHIVE_PATH = "/runtime/restore-archive.tar"
-_DEFAULT_RUNTIME_RESOURCES = runtime_resource_names()
-_RUNTIME_LOCK_PATH = _DEFAULT_RUNTIME_RESOURCES.lock_path
+_TIMEOUT_EXIT_CODES = frozenset({124, 137})  # timeout(1) and SIGKILL.
 _runtime_thread_locks: dict[str, threading.Lock] = {}
 _runtime_thread_locks_guard = threading.Lock()
 
 
 @dataclass(frozen=True)
-class PromptImage:
-    """Hold one safe prompt-image filename and its bytes."""
-
-    filename: str
-    content: bytes
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.filename, str) or not self.filename or "\\" in self.filename or "\x00" in self.filename:
-            raise ValueError("prompt image filename must be a safe basename")
-        path = PurePosixPath(self.filename)
-        if self.filename != path.name or self.filename in {".", ".."}:
-            raise ValueError("prompt image filename must be a safe basename")
-        if not isinstance(self.content, bytes):
-            raise TypeError("prompt image content must be bytes")
-
-
-def _normalize_prompt_images(prompt_images: object) -> tuple[PromptImage, ...]:
-    """Normalize typed and legacy prompt images into immutable values."""
-    if not isinstance(prompt_images, tuple):
-        raise TypeError("prompt_images must be a tuple of (name, content) tuples")
-    images = []
-    total_bytes = 0
-    for image in prompt_images:
-        if isinstance(image, PromptImage):
-            normalized = image
-        else:
-            if not isinstance(image, tuple) or len(image) != 2:
-                raise ValueError("each prompt image must be a (name, content) tuple")
-            normalized = PromptImage(filename=image[0], content=image[1])
-        total_bytes += len(normalized.content)
-        if total_bytes > MAX_PROMPT_IMAGE_BYTES:
-            raise ValueError(f"prompt images must not exceed {MAX_PROMPT_IMAGE_BYTES} bytes")
-        images.append(normalized)
-    return tuple(images)
+class ExecResult:
+    exit_code: int
+    stdout: str
+    stderr: str
 
 
 @dataclass(frozen=True)
-class ManagedExecutionRequest:
-    """Describe one complete managed-workspace OMP transaction."""
+class WorkspaceRestore:
+    """Restore a pinned workspace archive, optionally continuing the OMP session inside it."""
 
-    run_id: str
-    manifest_id: str | None
-    workspace_archive_path: str | None
-    expected_workspace_sha256: str | None
-    prompt: str
-    resuming: bool
-    prompt_images: tuple[PromptImage, ...] = ()
-    model: str | None = None
-    thinking: str | None = None
-    append_system: str | None = None
-    lean: bool = False
-    prior_runtime_fingerprint: str | None = None
+    archive: WorkspaceArchive
+    prior_runtime_fingerprint: str | None = None  # Set when resuming; must equal this run's effective fingerprint.
+
+    @property
+    def resuming(self) -> bool:
+        return self.prior_runtime_fingerprint is not None
 
 
 @dataclass(frozen=True)
 class ManagedExecutionResult:
-    """Return command output and the transient workspace snapshot from one transaction."""
+    """Return OMP output and the transient workspace capture from one transaction."""
 
-    exec_result: "ExecResult"
-    archive_path: str
-    workspace_sha256: str
-    runtime_fingerprint: str = ""
+    exec_result: ExecResult
+    workspace: WorkspaceArchive
+    runtime_fingerprint: str
 
 
 @contextmanager
-def _runtime_lease(lock_path: str = _RUNTIME_LOCK_PATH) -> Iterator[None]:
-    """Serialize physical use of one namespaced Docker runtime across processes."""
+def _runtime_lease(lock_path: str) -> Iterator[None]:
+    """Serialize physical use of one namespaced Docker runtime across threads and processes."""
     with _runtime_thread_locks_guard:
         thread_lock = _runtime_thread_locks.setdefault(lock_path, threading.Lock())
     with thread_lock, open(lock_path, "a+") as lock_file:
@@ -130,227 +95,223 @@ def _runtime_lease(lock_path: str = _RUNTIME_LOCK_PATH) -> Iterator[None]:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
-class AgentSandboxError(RuntimeError):
-    """Base error for caller-facing sandbox runtime failures."""
-
-
-class SecurityEnvironmentError(AgentSandboxError):
-    """Report missing rootless Docker, runsc, or image prerequisites."""
-
-
-class ContainerRuntimeError(AgentSandboxError):
-    """Report a container lifecycle or command failure."""
-
-
-class PythonScriptError(AgentSandboxError):
-    """Report a failed or timed-out disposable Python execution."""
-
-
-@dataclass(frozen=True)
-class ExecResult:
-    exit_code: int
-    stdout: str
-    stderr: str
-
-
-
-
-def _container_policy(network: str) -> dict:
-    """Build the mandatory isolation and network policy for every container."""
-    if network == "bridge":
-        network_policy = {"network_mode": "bridge"}
-    elif network == "disabled":
-        network_policy = {"network_disabled": True}
-    else:
-        raise ValueError(f"unsupported container network policy: {network!r}")
-    return {
-        "runtime": "runsc",
-        "user": "0:0",
-        "cap_drop": ["ALL"],
-        "security_opt": ["no-new-privileges"],
-        **network_policy,
-    }
-
-
-def _is_safe_archive_path(path: str) -> bool:
-    return bool(path) and not path.startswith("/") and all(part != ".." for part in PurePosixPath(path).parts)
-
-
-def _validate_restore_archive_member(member: tarfile.TarInfo) -> None:
-    if not _is_safe_archive_path(member.name):
-        raise ContainerRuntimeError(f"restore archive contains unsafe member path: {member.name!r}")
-    if member.issym() or member.islnk():
-        base = posixpath.dirname(member.name) if member.issym() else ""
-        target = member.linkname
-        resolved_target = posixpath.normpath(posixpath.join(base, target))
-        if not target or target.startswith("/") or not _is_safe_archive_path(resolved_target):
-            raise ContainerRuntimeError(f"restore archive contains unsafe link target: {target!r}")
-    elif not member.isfile() and not member.isdir():
-        raise ContainerRuntimeError(f"restore archive contains unsupported member type: {member.name!r}")
-
-
-def _validate_restore_archive(path: str) -> str:
-    """Validate and incrementally hash one bounded workspace tar before Docker mutation."""
-    try:
-        if os.path.getsize(path) > MAX_RESTORE_ARCHIVE_BYTES:
-            raise ContainerRuntimeError(f"restore archive exceeds {MAX_RESTORE_ARCHIVE_BYTES} byte limit")
-        with tarfile.open(path, mode="r:") as archive:
-            for member in archive:
-                _validate_restore_archive_member(member)
-        digest = hashlib.sha256()
-        size = 0
-        with open(path, "rb") as source:
-            for chunk in iter(lambda: source.read(1 << 20), b""):
-                size += len(chunk)
-                if size > MAX_RESTORE_ARCHIVE_BYTES:
-                    raise ContainerRuntimeError(f"restore archive exceeds {MAX_RESTORE_ARCHIVE_BYTES} byte limit")
-                digest.update(chunk)
-        return digest.hexdigest()
-    except ContainerRuntimeError:
-        raise
-    except (OSError, tarfile.TarError) as exc:
-        raise ContainerRuntimeError(f"Refusing restore archive: {exc}") from exc
+def _bind(source: str, target: str, *, read_only: bool = True) -> DockerMount:
+    return DockerMount(target=target, source=source, type="bind", read_only=read_only)
 
 
 def _stream_container_exec(
-    container: object,
+    container: Container,
     command: list[str],
     *,
     workdir: str | None = None,
     environment: dict[str, str] | None = None,
-    stdout_sink: Callable[[bytes], None] | None = None,
-    stdout_limit: int | None = None,
-    stderr_limit: int | None = None,
-    total_limit: int | None | object = _DEFAULT_OUTPUT_LIMIT,
+    workspace_sink: Callable[[bytes], None] | None = None,
 ) -> ExecResult:
-    """Execute and incrementally retain or consume demultiplexed container output."""
-    stdout_limit = MAX_RETAINED_OUTPUT_BYTES if stdout_limit is None else stdout_limit
-    stderr_limit = MAX_RETAINED_OUTPUT_BYTES if stderr_limit is None else stderr_limit
-    total_limit = MAX_RETAINED_OUTPUT_BYTES if total_limit is _DEFAULT_OUTPUT_LIMIT else total_limit
+    """Run one exec with bounded output.
+
+    Retained stdout and stderr share one MAX_RETAINED_OUTPUT_BYTES budget. With a workspace
+    sink, stdout streams into it under MAX_WORKSPACE_ARCHIVE_BYTES and only stderr is retained.
+    """
     api = container.client.api
-    created = api.exec_create(
-        container.id,
-        command,
-        stdout=True,
-        stderr=True,
-        environment=environment,
-        workdir=workdir,
-    )
-    exec_id = created["Id"] if isinstance(created, dict) else created
-    if not isinstance(exec_id, str) or not exec_id:
-        raise ContainerRuntimeError("Docker did not return an exec identifier")
-
-    stdout = bytearray()
-    stderr = bytearray()
-    stdout_size = 0
-    stderr_size = 0
-    total_size = 0
-    stream = api.exec_start(exec_id, stream=True, demux=True)
-    try:
-        for chunk in stream:
-            if isinstance(chunk, tuple):
-                stdout_chunk, stderr_chunk = chunk
-            else:
-                stdout_chunk, stderr_chunk = chunk, None
-            for stream_name, payload in (("stdout", stdout_chunk), ("stderr", stderr_chunk)):
-                if not payload:
-                    continue
-                if not isinstance(payload, bytes):
-                    raise ContainerRuntimeError(f"Docker returned non-bytes {stream_name} output")
-                total_size += len(payload)
-                if total_limit is not None and total_size > total_limit:
-                    raise ContainerRuntimeError(f"command output exceeds {total_limit} byte limit")
-                if stream_name == "stdout":
-                    stdout_size += len(payload)
-                    if stdout_size > stdout_limit:
-                        raise ContainerRuntimeError(f"captured workspace exceeds {stdout_limit} byte limit")
-                    if stdout_sink is None:
-                        stdout.extend(payload)
-                    else:
-                        stdout_sink(payload)
-                else:
-                    stderr_size += len(payload)
-                    if stderr_size > stderr_limit:
-                        raise ContainerRuntimeError(f"command diagnostics exceed {stderr_limit} byte limit")
-                    stderr.extend(payload)
-    finally:
-        close = getattr(stream, "close", None)
-        if callable(close):
-            close()
-
-    inspection = api.exec_inspect(exec_id)
-    exit_code = inspection.get("ExitCode") if isinstance(inspection, dict) else None
-    if type(exit_code) is not int:
+    exec_id = api.exec_create(container.id, command, stdout=True, stderr=True, environment=environment, workdir=workdir)["Id"]
+    stdout, stderr = bytearray(), bytearray()
+    sunk = 0
+    with closing(api.exec_start(exec_id, stream=True, demux=True)) as stream:
+        for stdout_chunk, stderr_chunk in stream:
+            if stderr_chunk:
+                stderr.extend(stderr_chunk)
+            if stdout_chunk and workspace_sink is None:
+                stdout.extend(stdout_chunk)
+            elif stdout_chunk:
+                sunk += len(stdout_chunk)
+                if sunk > MAX_WORKSPACE_ARCHIVE_BYTES:
+                    raise ArchiveError(f"captured workspace exceeds {MAX_WORKSPACE_ARCHIVE_BYTES} byte limit")
+                workspace_sink(stdout_chunk)
+            if len(stdout) + len(stderr) > MAX_RETAINED_OUTPUT_BYTES:
+                raise ContainerRuntimeError(f"command output exceeds {MAX_RETAINED_OUTPUT_BYTES} byte limit")
+    exit_code = api.exec_inspect(exec_id)["ExitCode"]
+    if exit_code is None:
         raise ContainerRuntimeError("Docker did not report an exec exit code")
-    return ExecResult(exit_code, bytes(stdout).decode(errors="replace"), bytes(stderr).decode(errors="replace"))
+    return ExecResult(exit_code, stdout.decode(errors="replace"), stderr.decode(errors="replace"))
+
+
+def _remove_container(container: Container, label: str, error: type[AgentSandboxError], failure: BaseException | None) -> None:
+    """Force-remove a container, keeping any operation failure visible beside a cleanup failure."""
+    try:
+        container.remove(force=True)
+    except Exception as cleanup_error:
+        if failure is None:
+            raise error(f"failed to force-remove {label} container: {cleanup_error}") from cleanup_error
+        raise error(
+            f"{label} execution failed ({failure}). Additionally failed to force-remove container: {cleanup_error}"
+        ) from cleanup_error
 
 
 class SandboxRuntime:
-    """Run isolated managed-workspace transactions for one profile."""
+    """Run isolated containers for one profile."""
 
-    def __init__(self, profile: Profile, resource_names: RuntimeResourceNames | None = None) -> None:
+    def __init__(
+        self,
+        profile: Profile,
+        resource_names: RuntimeResourceNames | None = None,
+        client: docker.DockerClient | None = None,
+    ) -> None:
         self.profile = profile
-        self._resource_names = resource_names or _DEFAULT_RUNTIME_RESOURCES
-        try:
-            self.client = docker.DockerClient(base_url=DOCKER_HOST)
-        except docker.errors.DockerException as exc:
-            raise SecurityEnvironmentError(f"Failed to connect to Docker at {DOCKER_HOST}: {exc}") from exc
+        self._resource_names = resource_names or runtime_resource_names()
+        if client is None:
+            try:
+                client = docker.DockerClient(base_url=DOCKER_HOST)
+            except docker.errors.DockerException as exc:
+                raise SecurityEnvironmentError(f"Failed to connect to Docker at {DOCKER_HOST}: {exc}") from exc
+        self.client = client
 
-    def _resources(self) -> RuntimeResourceNames:
-        return getattr(self, "_resource_names", _DEFAULT_RUNTIME_RESOURCES)
-
-    def run_probe(self, argv: list[str]) -> bytes:
-        """Run a bridge-networked diagnostic container through a fail-closed lifecycle."""
-        container = None
-        try:
-            container = self.client.containers.create(
-                self.profile.image,
-                argv,
-                mounts=[
-                    DockerMount(target=mount.target, source=mount.source, type="bind", read_only=(mount.mode == "ro"))
-                    for mount in self.profile.mounts
-                ],
-                read_only=True,
-                tmpfs=self._tmpfs(runtime=False),
-                **_container_policy("bridge"),
-            )
-            container.start()
-            result = container.wait()
-            output = container.logs(stdout=True, stderr=True)
-            exit_code = result.get("StatusCode")
-            if exit_code != 0:
-                raise docker.errors.ContainerError(
-                    container,
-                    exit_code,
-                    argv,
-                    self.profile.image,
-                    output,
-                )
-            return output
-        finally:
-            if container is not None:
-                container.remove(force=True)
-
-    def _verify_environment(self) -> str:
-        """Verify the daemon prerequisites and return the immutable resolved image ID."""
+    def verify_environment(self) -> str:
+        """Verify rootless Docker, gVisor, and the profile image; return the resolved image ID."""
         try:
             info = self.client.info()
         except docker.errors.DockerException as exc:
             raise SecurityEnvironmentError(f"Docker daemon unreachable: {exc}") from exc
         if not any("rootless" in option.lower() for option in info.get("SecurityOptions", [])):
-            raise SecurityEnvironmentError("Rootless Docker is not enabled. Daemon must run in rootless mode.")
+            raise SecurityEnvironmentError("Docker daemon is not rootless; rerun scripts/setup_agent_sandbox.sh")
         if "runsc" not in info.get("Runtimes", {}):
-            raise SecurityEnvironmentError("gVisor 'runsc' runtime is not configured in Docker.")
+            raise SecurityEnvironmentError("gVisor 'runsc' is not registered with Docker; rerun scripts/setup_agent_sandbox.sh")
         try:
-            image = self.client.images.get(self.profile.image)
-        except docker.errors.ImageNotFound:
-            raise SecurityEnvironmentError(f"Image '{self.profile.image}' not found.")
-        image_id = getattr(image, "id", None)
-        if not isinstance(image_id, str) or not image_id:
-            image_id = getattr(image, "attrs", {}).get("Id") if isinstance(getattr(image, "attrs", {}), dict) else None
-        if not isinstance(image_id, str) or not image_id:
-            raise SecurityEnvironmentError(f"Image '{self.profile.image}' did not expose a resolved Docker image ID.")
-        return image_id
+            return self.client.images.get(self.profile.image).id
+        except docker.errors.ImageNotFound as exc:
+            raise SecurityEnvironmentError(f"image '{self.profile.image}' not found; build docker/Dockerfile") from exc
+        except docker.errors.DockerException as exc:
+            raise SecurityEnvironmentError(f"could not inspect image '{self.profile.image}': {exc}") from exc
+
+    @contextmanager
+    def _fresh_container(
+        self,
+        image: str,
+        *,
+        label: str,
+        error: type[AgentSandboxError],
+        network: bool,
+        mounts: list[DockerMount],
+        runtime_tmpfs: bool = False,
+        environment: dict[str, str] | None = None,
+        name: str | None = None,
+    ) -> Iterator[Container]:
+        """Create and start one hardened idle container, and always force-remove it."""
+        tmpfs = {"/tmp": f"rw,nosuid,nodev,size={TMP_TMPFS_SIZE}"}
+        if runtime_tmpfs:
+            # OMP extracts and dlopens its native addon under $HOME, which lives here.
+            tmpfs["/runtime"] = f"rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}"
+        container = self.client.containers.create(
+            image,
+            command=["sleep", "infinity"],
+            name=name,
+            read_only=True,
+            tmpfs=tmpfs,
+            mounts=mounts,
+            environment=environment or {},
+            runtime="runsc",
+            user="0:0",
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            **({"network_mode": "bridge"} if network else {"network_disabled": True}),
+        )
+        try:
+            container.start()
+            yield container
+        except BaseException as failure:
+            _remove_container(container, label, error, failure)
+            raise
+        _remove_container(container, label, error, None)
+
+    def run_probe(self, argv: list[str]) -> str:
+        """Run one diagnostic command in a fresh bridge-networked container and return its stdout."""
+        mounts = [_bind(mount.source, mount.target, read_only=mount.read_only) for mount in self.profile.mounts]
+        with self._fresh_container(
+            self.profile.image, label="probe", error=ContainerRuntimeError, network=True, mounts=mounts
+        ) as container:
+            result = _stream_container_exec(container, argv)
+        if result.exit_code != 0:
+            raise ContainerRuntimeError(f"probe exited {result.exit_code}: {(result.stdout + result.stderr).strip()}")
+        return result.stdout
+
+    def execute(self, task: OmpTask, restore: WorkspaceRestore | None = None) -> ManagedExecutionResult:
+        """Run one OMP task in a fresh managed container under the namespace lease."""
+        with (
+            _runtime_lease(self._resource_names.lock_path),
+            tempfile.TemporaryDirectory(prefix="agent-sandbox-inputs-") as staging_dir,
+        ):
+            image_id = self.verify_environment()
+            self._remove_stale_container()
+            fingerprint = self._effective_runtime_fingerprint(image_id)
+            mounts = [*self._managed_mounts(), *self._stage_task_inputs(task, staging_dir)]
+            if restore is not None:
+                self._verify_restore(restore, fingerprint)
+                mounts.append(_bind(restore.archive.path, _RESTORE_ARCHIVE_PATH))
+            argv = build_omp_argv(
+                self.profile.omp_binary,
+                task,
+                session_dir=_SESSION_DIR,
+                resuming=restore is not None and restore.resuming,
+                images_dir=_PROMPT_IMAGES_DIR,
+                append_system_path=_APPEND_SYSTEM_PATH,
+            )
+            capture: WorkspaceArchive | None = None
+            try:
+                with self._fresh_container(
+                    image_id,
+                    label="managed",
+                    error=ContainerRuntimeError,
+                    network=True,
+                    mounts=mounts,
+                    runtime_tmpfs=True,
+                    environment=self._environment(),
+                    name=self._resource_names.container,
+                ) as container:
+                    self._prepare_container(container, restoring=restore is not None)
+                    exec_result = _stream_container_exec(
+                        container,
+                        ["timeout", "--signal=KILL", f"{MANAGED_OMP_TIMEOUT_SECONDS}s", *argv],
+                        workdir=INTERNAL_WORKDIR,
+                        environment=self._omp_environment(),
+                    )
+                    if exec_result.exit_code in _TIMEOUT_EXIT_CODES:
+                        raise ContainerRuntimeError(f"OMP execution exceeded {MANAGED_OMP_TIMEOUT_SECONDS}s limit")
+                    capture = self._capture_workspace(container)
+            except BaseException:
+                if capture is not None:  # Only container removal can fail after capture.
+                    with suppress(FileNotFoundError):
+                        os.unlink(capture.path)
+                raise
+            return ManagedExecutionResult(exec_result, capture, fingerprint)
+
+    def execute_python(self, interpreter: str, script: str, timeout: float) -> str:
+        """Run a script in a fresh network-disabled container and return bounded stdout."""
+        interpreter_path = self.profile.python_interpreters.get(interpreter)
+        if interpreter_path is None:
+            raise PythonScriptError(f"Unknown profile Python interpreter: {interpreter!r}.")
+        if not isinstance(script, str):
+            raise PythonScriptError("Python script must be text.")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise PythonScriptError("Python timeout must be a positive finite number.")
+        try:
+            image_id = self.verify_environment()
+            with self._fresh_container(
+                image_id, label="Python", error=PythonScriptError, network=False, mounts=self._python_mounts()
+            ) as container:
+                result = _stream_container_exec(
+                    container,
+                    ["timeout", "--signal=KILL", f"{timeout:g}s", interpreter_path, "-c", script],
+                    workdir="/",
+                    environment={},
+                )
+        except PythonScriptError:
+            raise
+        except Exception as exc:
+            raise PythonScriptError(f"Sandbox Python execution failed: {exc}") from exc
+        if result.exit_code in _TIMEOUT_EXIT_CODES:
+            raise PythonScriptError(f"Python script did not finish within {timeout:g}s.")
+        if result.exit_code != 0:
+            raise PythonScriptError(result.stderr.strip()[-4000:] or f"exited with status {result.exit_code}")
+        return result.stdout
 
     def _effective_runtime_fingerprint(self, image_id: str) -> str:
         """Bind canonical profile policy to the image bytes Docker resolved for this run."""
@@ -358,15 +319,24 @@ class SandboxRuntime:
         return f"sha256:{hashlib.sha256(material).hexdigest()}"
 
     def _remove_stale_container(self) -> None:
-        """Remove a stopped or leaked predecessor before allocating this namespace name."""
+        """Remove a stopped or leaked predecessor before reusing this namespace's container name."""
         try:
-            stale = self.client.containers.get(self._resources().container)
+            stale = self.client.containers.get(self._resource_names.container)
         except docker.errors.NotFound:
             return
         stale.remove(force=True)
 
+    @staticmethod
+    def _verify_restore(restore: WorkspaceRestore, runtime_fingerprint: str) -> None:
+        """Refuse a restore whose runtime or archive bytes differ from what the caller pinned."""
+        if restore.resuming and restore.prior_runtime_fingerprint != runtime_fingerprint:
+            raise ContainerRuntimeError("Refusing restore: runtime fingerprint mismatch")
+        digest = verify_archive(restore.archive.path)
+        if digest != restore.archive.sha256:
+            raise ArchiveError(f"Refusing restore: workspace hash mismatch (expected {restore.archive.sha256}, got {digest})")
+
     def _rewrite_target(self, target: str) -> str:
-        """Rewrite workspace-relative bind mount targets for the ephemeral workspace."""
+        """Move workspace-relative bind mount targets into the ephemeral workspace."""
         workdir = self.profile.workdir.rstrip("/")
         if target == workdir:
             return INTERNAL_WORKDIR
@@ -375,298 +345,87 @@ class SandboxRuntime:
         return target
 
     def _managed_mounts(self) -> list[DockerMount]:
-        return [
-            DockerMount(target=self._rewrite_target(mount.target), source=mount.source, type="bind", read_only=(mount.mode == "ro"))
-            for mount in self.profile.mounts
-        ]
+        return [_bind(mount.source, self._rewrite_target(mount.target), read_only=mount.read_only) for mount in self.profile.mounts]
 
     def _python_mounts(self) -> list[DockerMount]:
         """Mount only profile locations that provide registered Python interpreters."""
-        interpreter_paths = tuple(dict(self.profile.python_interpreters).values())
-        return [
-            DockerMount(target=mount.target, source=mount.source, type="bind", read_only=True)
-            for mount in self.profile.mounts
-            if any(
-                mount.target == "/" or path == mount.target.rstrip("/") or path.startswith(mount.target.rstrip("/") + "/")
-                for path in interpreter_paths
-            )
-        ]
+        interpreter_paths = tuple(self.profile.python_interpreters.values())
+
+        def provides_interpreter(target: str) -> bool:
+            root = target.rstrip("/")
+            return target == "/" or any(path == root or path.startswith(root + "/") for path in interpreter_paths)
+
+        return [_bind(mount.source, mount.target) for mount in self.profile.mounts if provides_interpreter(mount.target)]
 
     @staticmethod
-    def _tmpfs(*, runtime: bool) -> dict[str, str]:
-        tmpfs = {"/tmp": f"rw,nosuid,nodev,size={TMP_TMPFS_SIZE}"}
-        if runtime:
-            # OMP extracts and dlopens its native addon under $HOME, which lives here.
-            tmpfs["/runtime"] = f"rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}"
-        return tmpfs
-
-    def _create_managed_container(self, image_id: str, restore_archive_path: str | None, input_mounts: list[DockerMount]) -> object:
-        mounts = [*self._managed_mounts(), *input_mounts]
-        if restore_archive_path is not None:
-            mounts.append(
-                DockerMount(target=_RESTORE_ARCHIVE_PATH, source=restore_archive_path, type="bind", read_only=True)
-            )
-        return self.client.containers.create(
-            image_id,
-            name=self._resources().container,
-            command=["sleep", "infinity"],
-            read_only=True,
-            tmpfs=self._tmpfs(runtime=True),
-            mounts=mounts,
-            environment=self._environment(),
-            **_container_policy("bridge"),
-        )
-
-    def _environment(self) -> dict[str, str]:
-        """Forward only allowlisted variables and declared bridged host services."""
-        forwarded = {name: os.environ[name] for name in self.profile.env_passthrough if name in os.environ}
-        if not self.profile.host_services:
-            return forwarded
-        return {
-            **forwarded,
-            **{name: f"http://{HOST_SERVICE_ADDRESS}:{port}" for name, port in self.profile.host_services},
-        }
-
-    def _omp_environment(self) -> dict[str, str]:
-        bin_dirs = [str(PurePosixPath(path).parent) for _label, path in self.profile.python_interpreters]
-        path = ":".join([*dict.fromkeys(bin_dirs), "/usr/local/bin", "/usr/bin", "/bin"])
-        return {**self._environment(), "HOME": _OMP_HOME, "PATH": path}
-
-    def _run_or_raise(self, container: object, command: str) -> None:
-        result = _stream_container_exec(container, ["sh", "-c", command])
-        if result.exit_code != 0:
-            detail = result.stdout or result.stderr
-            raise ContainerRuntimeError(f"container setup failed (exit {result.exit_code}): {command}\n{detail}")
-
-    def _restore_workspace(self, container: object, archive_path: str | None) -> None:
-        self._run_or_raise(container, f"mkdir -p {INTERNAL_WORKDIR}")
-        if archive_path is not None:
-            self._run_or_raise(
-                container,
-                f"tar --extract --file={_RESTORE_ARCHIVE_PATH} --directory={INTERNAL_WORKDIR} "
-                "--no-same-owner --no-same-permissions",
-            )
-
-
-    def _prepare_omp_home(self, container: object) -> None:
-        """Create a writable OMP home in this transaction's runtime tmpfs."""
-        self._run_or_raise(
-            container,
-            f"rm -rf {_OMP_HOME} && mkdir -p {_OMP_HOME}/.omp && "
-            f"{{ [ ! -d /root/.omp ] || cp -a /root/.omp/. {_OMP_HOME}/.omp/; }}",
-        )
-
-    def _invoke_omp(self, container: object, argv: list[str]) -> ExecResult:
-        self._prepare_omp_home(container)
-        result = _stream_container_exec(container, argv, workdir=INTERNAL_WORKDIR, environment=self._omp_environment())
-        if result.exit_code in {124, 137}:
-            raise ContainerRuntimeError(f"OMP execution exceeded {MANAGED_OMP_TIMEOUT_SECONDS}s limit")
-        return result
-
-    def _captured_exclusions(self) -> list[str]:
-        """Return exact workspace-relative bind-mount paths to omit from a snapshot."""
-        prefix = INTERNAL_WORKDIR + "/"
-        return sorted(
-            {
-                target[len(prefix) :]
-                for mount in self.profile.mounts
-                if (target := self._rewrite_target(mount.target)).startswith(prefix)
-            }
-        )
-
-    def _capture_workspace(self, container: object) -> tuple[str, str]:
-        """Stream a bounded tar snapshot, then validate and hash it before publication."""
-        exclusions = [f"--exclude=./{path}" for path in self._captured_exclusions()]
-        command = [
-            "tar",
-            "-C",
-            INTERNAL_WORKDIR,
-            "--anchored",
-            "--no-wildcards",
-            *exclusions,
-            "-cf",
-            "-",
-            ".",
-        ]
-        descriptor, archive_path = tempfile.mkstemp(suffix=".tar", prefix="agent-sandbox-snapshot-")
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb") as archive:
-                result = _stream_container_exec(
-                    container,
-                    command,
-                    stdout_sink=archive.write,
-                    stdout_limit=MAX_CAPTURED_WORKSPACE_BYTES,
-                    stderr_limit=MAX_RETAINED_OUTPUT_BYTES,
-                    total_limit=None,
-                )
-            if result.exit_code != 0:
-                raise ContainerRuntimeError(f"capture failed: tar exited {result.exit_code}: {result.stderr}")
-            return archive_path, _validate_restore_archive(archive_path)
-        except Exception:
-            with suppress(FileNotFoundError):
-                os.unlink(archive_path)
-            raise
-
-    def _verified_restore_archive(self, request: ManagedExecutionRequest, effective_fingerprint: str) -> str | None:
-        """Validate all restore preconditions before mutating a managed container."""
-        if request.manifest_id is not None:
-            if request.prior_runtime_fingerprint != effective_fingerprint:
-                raise ContainerRuntimeError(f"Refusing restore for manifest {request.manifest_id}: runtime fingerprint mismatch")
-            if request.expected_workspace_sha256 is None:
-                raise ContainerRuntimeError(f"Refusing restore for manifest {request.manifest_id}: workspace hash is missing")
-            if request.workspace_archive_path is None:
-                raise ContainerRuntimeError(f"Refusing restore for manifest {request.manifest_id}: workspace archive is required")
-        elif request.workspace_archive_path is None and request.expected_workspace_sha256 is not None:
-            raise ContainerRuntimeError("workspace hash requires a workspace archive")
-        elif request.workspace_archive_path is not None and request.expected_workspace_sha256 is None:
-            raise ContainerRuntimeError("workspace archive requires a workspace hash")
-
-        if request.workspace_archive_path is None:
-            return None
-        digest = _validate_restore_archive(request.workspace_archive_path)
-        if digest != request.expected_workspace_sha256:
-            raise ContainerRuntimeError(
-                f"Refusing restore for manifest {request.manifest_id}: workspace hash mismatch "
-                f"(expected {request.expected_workspace_sha256}, got {digest})"
-            )
-        return request.workspace_archive_path
-
-    @staticmethod
-    def _stage_invocation_inputs(request: ManagedExecutionRequest, staging_dir: str) -> list[DockerMount]:
+    def _stage_task_inputs(task: OmpTask, staging_dir: str) -> list[DockerMount]:
         """Write per-run inputs to host files and expose them as read-only bind mounts.
 
         Under gVisor the /runtime tmpfs lives in the sandbox kernel, invisible to Docker's
         host-side archive API, so inputs must enter the way the restore archive does.
         """
         mounts = []
-        if request.append_system is not None:
+        if task.append_system is not None:
             append_dir = os.path.join(staging_dir, "append-system")
             os.mkdir(append_dir)
             with open(os.path.join(append_dir, "APPEND_SYSTEM.md"), "w", encoding="utf-8") as file:
-                file.write(request.append_system)
-            mounts.append(DockerMount(target=_APPEND_SYSTEM_DIR, source=append_dir, type="bind", read_only=True))
-        if request.prompt_images:
+                file.write(task.append_system)
+            mounts.append(_bind(append_dir, _APPEND_SYSTEM_DIR))
+        if task.prompt_images:
             images_dir = os.path.join(staging_dir, "prompt-images")
             os.mkdir(images_dir)
-            for image in request.prompt_images:
+            for image in task.prompt_images:
                 with open(os.path.join(images_dir, image.filename), "xb") as file:
                     file.write(image.content)
-            mounts.append(DockerMount(target=_PROMPT_IMAGES_DIR, source=images_dir, type="bind", read_only=True))
+            mounts.append(_bind(images_dir, _PROMPT_IMAGES_DIR))
         return mounts
 
-    def execute(self, request: ManagedExecutionRequest) -> ManagedExecutionResult:
-        """Run one fresh-container managed OMP transaction under the namespace lease."""
-        image_paths = tuple(f"{_PROMPT_IMAGES_DIR}/{image.filename}" for image in request.prompt_images)
-        with _runtime_lease(self._resources().lock_path), tempfile.TemporaryDirectory(prefix="agent-sandbox-inputs-") as staging_dir:
-            image_id = self._verify_environment()
-            self._remove_stale_container()
-            effective_fingerprint = self._effective_runtime_fingerprint(image_id)
-            restore_archive = self._verified_restore_archive(request, effective_fingerprint)
-            container = None
-            capture_path: str | None = None
-            operation_error: BaseException | None = None
-            try:
-                container = self._create_managed_container(
-                    image_id, restore_archive, self._stage_invocation_inputs(request, staging_dir)
-                )
-                container.start()
-                self._restore_workspace(container, restore_archive)
-                argv = build_omp_argv(
-                    self.profile.omp_binary,
-                    request.prompt,
-                    session_dir=f"{INTERNAL_WORKDIR}/.omp-session",
-                    resuming=request.resuming,
-                    image_paths=image_paths,
-                    model=request.model,
-                    thinking=request.thinking,
-                    append_system_path=_APPEND_SYSTEM_PATH if request.append_system is not None else None,
-                    lean=request.lean,
-                )
-                exec_result = self._invoke_omp(
-                    container, ["timeout", "--signal=KILL", f"{MANAGED_OMP_TIMEOUT_SECONDS}s", *argv]
-                )
-                capture_path, workspace_sha256 = self._capture_workspace(container)
-                return ManagedExecutionResult(exec_result, capture_path, workspace_sha256, effective_fingerprint)
-            except BaseException as exc:
-                operation_error = exc
-                raise
-            finally:
-                if container is not None:
-                    try:
-                        container.remove(force=True)
-                    except Exception as cleanup_error:
-                        if capture_path is not None:
-                            with suppress(FileNotFoundError):
-                                os.unlink(capture_path)
-                        if operation_error is not None:
-                            raise ContainerRuntimeError(
-                                f"managed execution failed ({operation_error}). "
-                                f"Additionally failed to force-remove container: {cleanup_error}"
-                            ) from cleanup_error
-                        raise ContainerRuntimeError(f"failed to force-remove managed container: {cleanup_error}") from cleanup_error
+    def _environment(self) -> dict[str, str]:
+        """Forward only allowlisted variables and declared bridged host services."""
+        forwarded = {name: os.environ[name] for name in self.profile.env_passthrough if name in os.environ}
+        services = {name: f"http://{HOST_SERVICE_ADDRESS}:{port}" for name, port in self.profile.host_services.items()}
+        return {**forwarded, **services}
 
-    def execute_python(self, interpreter: str, script: str, timeout: float) -> str:
-        """Run a script in a fresh network-disabled container and return bounded stdout."""
-        interpreters = dict(self.profile.python_interpreters)
-        interpreter_path = interpreters.get(interpreter)
-        if interpreter_path is None:
-            raise PythonScriptError(f"Unknown profile Python interpreter: {interpreter!r}.")
-        if not isinstance(script, str):
-            raise PythonScriptError("Python script must be text.")
-        if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-            raise PythonScriptError("Python timeout must be a positive finite number.")
+    def _omp_environment(self) -> dict[str, str]:
+        bin_dirs = [str(PurePosixPath(path).parent) for path in self.profile.python_interpreters.values()]
+        path = ":".join([*dict.fromkeys(bin_dirs), "/usr/local/bin", "/usr/bin", "/bin"])
+        return {**self._environment(), "HOME": _OMP_HOME, "PATH": path}
 
-        container = None
-        operation_error: PythonScriptError | None = None
+    @staticmethod
+    def _prepare_container(container: Container, *, restoring: bool) -> None:
+        """Create the workspace, extract any mounted restore archive, and seed a writable OMP home."""
+        steps = [f"mkdir -p {INTERNAL_WORKDIR}"]
+        if restoring:
+            steps.append(
+                f"tar --extract --file={_RESTORE_ARCHIVE_PATH} --directory={INTERNAL_WORKDIR} --no-same-owner --no-same-permissions"
+            )
+        steps.append(f"rm -rf {_OMP_HOME} && mkdir -p {_OMP_HOME}/.omp")
+        steps.append(f"{{ [ ! -d /root/.omp ] || cp -a /root/.omp/. {_OMP_HOME}/.omp/; }}")
+        command = " && ".join(steps)
+        result = _stream_container_exec(container, ["sh", "-c", command])
+        if result.exit_code != 0:
+            raise ContainerRuntimeError(
+                f"container setup failed (exit {result.exit_code}): {command}\n{result.stdout or result.stderr}"
+            )
+
+    def _captured_exclusions(self) -> list[str]:
+        """Return workspace-relative bind-mount paths to omit from a snapshot."""
+        prefix = INTERNAL_WORKDIR + "/"
+        targets = (self._rewrite_target(mount.target) for mount in self.profile.mounts)
+        return sorted({target[len(prefix) :] for target in targets if target.startswith(prefix)})
+
+    def _capture_workspace(self, container: Container) -> WorkspaceArchive:
+        """Stream a bounded tar snapshot to a private file, then validate and pin it."""
+        exclusions = [f"--exclude=./{path}" for path in self._captured_exclusions()]
+        command = ["tar", "-C", INTERNAL_WORKDIR, "--anchored", "--no-wildcards", *exclusions, "-cf", "-", "."]
+        descriptor, archive_path = tempfile.mkstemp(suffix=".tar", prefix="agent-sandbox-snapshot-")
         try:
-            image_id = self._verify_environment()
-            container = self.client.containers.create(
-                image_id,
-                command=["sleep", "infinity"],
-                read_only=True,
-                tmpfs=self._tmpfs(runtime=False),
-                **_container_policy("disabled"),
-                mounts=self._python_mounts(),
-                environment={},
-                working_dir="/",
-            )
-            container.start()
-            result = _stream_container_exec(
-                container,
-                ["timeout", "--signal=KILL", f"{timeout:g}s", interpreter_path, "-c", script],
-                workdir="/",
-                environment={},
-            )
-            if result.exit_code in {124, 137}:
-                raise PythonScriptError(f"Python script did not finish within {timeout:g}s.")
+            with os.fdopen(descriptor, "wb") as archive:
+                result = _stream_container_exec(container, command, workspace_sink=archive.write)
             if result.exit_code != 0:
-                raise PythonScriptError(result.stderr.strip()[-4000:] or f"exited with status {result.exit_code}")
-            return result.stdout
-        except PythonScriptError as exc:
-            operation_error = exc
+                raise ContainerRuntimeError(f"capture failed: tar exited {result.exit_code}: {result.stderr}")
+            return WorkspaceArchive(archive_path, verify_archive(archive_path))
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink(archive_path)
             raise
-        except Exception as exc:
-            operation_error = PythonScriptError(f"Sandbox Python execution failed: {exc}")
-            raise operation_error from exc
-        finally:
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except Exception as cleanup_error:
-                    if operation_error is not None:
-                        raise PythonScriptError(
-                            f"Python execution failed ({operation_error}). "
-                            f"Additionally failed to force-remove container: {cleanup_error}"
-                        ) from cleanup_error
-                    raise PythonScriptError(f"failed to force-remove Python container: {cleanup_error}") from cleanup_error
-
-
-def run_python_script(interpreter: str, script: str, timeout: float, *, profile_name: str = "gigachad") -> str:
-    """Run Python from a named profile in a fresh rootless Docker/gVisor sandbox."""
-    try:
-        return SandboxRuntime(load_profile(profile_name)).execute_python(interpreter, script, timeout)
-    except PythonScriptError:
-        raise
-    except Exception as exc:
-        raise PythonScriptError(str(exc)) from exc
