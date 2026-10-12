@@ -8,8 +8,10 @@ set -euo pipefail
 
 RUNSC_PATH="$HOME/.local/bin/runsc"
 DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+export DOCKER_HOST
+# DOCKER_CONTEXT otherwise takes precedence over DOCKER_HOST.
+unset DOCKER_CONTEXT
 CONFIG_FILE="$HOME/.config/docker/daemon.json"
-
 
 fail() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -20,37 +22,21 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "Required command '$1' is not installed."
 }
 
-has_subordinate_range() {
-    awk -F: -v user="$USER" '$1 == user && $3 >= 65536 { found = 1 } END { exit !found }' "$1"
-}
-
-ensure_subordinate_ids() {
-    require_command sudo
-    if ! has_subordinate_range /etc/subuid; then
-        sudo usermod --add-subuids 100000-165535 "$USER"
-    fi
-    if ! has_subordinate_range /etc/subgid; then
-        sudo usermod --add-subgids 100000-165535 "$USER"
-    fi
+rootless_docker_available() {
+    docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -qi rootless
 }
 
 install_rootless_docker_packages() {
+    require_command sudo
     [[ -r /etc/os-release ]] || fail "Cannot identify the Linux distribution because /etc/os-release is unavailable."
     . /etc/os-release
 
-    # Omarchy and other Arch derivatives report their own ID and Arch through ID_LIKE.
-    if [[ "$ID" == arch || " ${ID_LIKE:-} " == *" arch "* ]]; then
-        arch_like=true
-    else
-        arch_like=false
-    fi
-
     if [[ "$ID" == debian || "$ID" == ubuntu ]]; then
-        require_command sudo
         require_command apt-get
         sudo apt-get update
         sudo apt-get install -y docker-ce docker-ce-rootless-extras uidmap
-    elif [[ "$arch_like" == true ]]; then
+    elif [[ "$ID" == arch || " ${ID_LIKE:-} " == *" arch "* ]]; then
+        local aur_helper
         if command -v yay >/dev/null 2>&1; then
             aur_helper=yay
         elif command -v paru >/dev/null 2>&1; then
@@ -64,15 +50,25 @@ install_rootless_docker_packages() {
     fi
 }
 
-ensure_rootless_docker() {
-    if [[ -S "${DOCKER_HOST#unix://}" ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker info --format '{{json .SecurityOptions}}' | grep -qi rootless; then
-        printf '%s\n' 'Using the existing rootless Docker daemon.'
-        return
-    fi
+for command in python3 curl sha512sum tar zstd; do
+    require_command "$command"
+done
+GVISOR_ARCH="$(uname -m)"
+case "$GVISOR_ARCH" in
+    x86_64|aarch64) ;;
+    *) fail "Unsupported architecture: $GVISOR_ARCH." ;;
+esac
 
-    printf '%s\n' 'Installing rootless Docker prerequisites...'
+printf '%s\n' 'Ensuring a rootless Docker daemon is available...'
+if rootless_docker_available; then
+    printf '%s\n' 'Using the existing rootless Docker daemon.'
+else
     install_rootless_docker_packages
-    ensure_subordinate_ids
+    for kind in uid gid; do
+        if ! awk -F: -v user="$USER" '$1 == user && $3 >= 65536 { found = 1 } END { exit !found }' "/etc/sub$kind"; then
+            sudo usermod "--add-sub${kind}s" 100000-165535 "$USER"
+        fi
+    done
 
     rootless_setup_tool="$(command -v dockerd-rootless-setuptool.sh || true)"
     if [[ -z "$rootless_setup_tool" && -x /usr/share/docker.io/contrib/dockerd-rootless-setuptool.sh ]]; then
@@ -96,26 +92,7 @@ ensure_rootless_docker() {
     else
         fail "Docker was installed but its rootless setup tool and user service are unavailable."
     fi
-}
-
-printf '%s\n' 'Ensuring a rootless Docker daemon is available...'
-ensure_rootless_docker
-require_command docker
-require_command python3
-require_command sha512sum
-export DOCKER_HOST
-
-[[ -S "${DOCKER_HOST#unix://}" ]] || fail "Rootless Docker socket is unavailable at $DOCKER_HOST after installation."
-docker info >/dev/null 2>&1 || fail "Cannot connect to rootless Docker at $DOCKER_HOST after installation."
-docker info --format '{{json .SecurityOptions}}' | grep -qi rootless || fail "Docker at $DOCKER_HOST is not rootless after installation."
-
-require_command curl
-if [[ "$(uname -m)" == x86_64 ]]; then
-    GVISOR_ARCH=x86_64
-elif [[ "$(uname -m)" == aarch64 ]]; then
-    GVISOR_ARCH=aarch64
-else
-    fail "Unsupported architecture: $(uname -m)."
+    rootless_docker_available || fail "Rootless Docker is unavailable at $DOCKER_HOST."
 fi
 
 temporary_dir="$(mktemp -d)"
@@ -176,7 +153,7 @@ printf '%s\n' 'Configured runsc without CPU, memory, or PID cgroup limits.'
 
 printf '%s\n' 'Restarting the current user Docker service...'
 systemctl --user restart docker || fail "Could not restart the user Docker service. Restart it manually, then rerun this script."
-docker info >/dev/null 2>&1 || fail "Rootless Docker did not become available after restart."
+rootless_docker_available || fail "Rootless Docker did not become available after restart."
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc"' || fail "Docker did not register the runsc runtime."
 
 printf '%s\n' 'Rootless Docker and gVisor runsc are registered.'

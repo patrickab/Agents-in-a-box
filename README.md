@@ -1,6 +1,6 @@
 # Agents-in-a-Box
 
-**Secure orchestration layer for autonomous coding agents.** Wraps code execution into a heavily restricted, sandboxed runtime.
+**A sandbox runtime for coding agents.** Runs [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) in disposable containers using rootless Docker and gVisor, with a Python API and CLI.
 
 ---
 
@@ -15,101 +15,122 @@ By default this means:
 
 While coding agents typically ask for permission or filter auto-approval for harmful commands, they can technically send any user-accessible (private) data to any publicly accessible domain, download & install arbitrary software in the userspace or execute arbitrary code.
 
+- **Fresh containers:** each run starts clean and is removed afterward.
+- **Explicit access:** profiles define host mounts, environment variables, and local services such as Ollama.
+- **Workspace continuity:** verified archives and session manifests let work continue across runs without keeping a container alive.
+- **Isolated Python:** run small scripts with a profile-defined interpreter and networking disabled.
+ 
 ---
-
-
-
+ 
 ## Security architecture: defense in depth
 
-### 1. Runtime isolation
 
-Each managed OMP invocation receives a **fresh** container. The runtime force-removes it after completion or failure.
+[Rootless Docker](https://docs.docker.com/engine/security/rootless/) runs without host root privileges. [gVisor](https://github.com/google/gvisor) adds a user-space kernel between the agent and the host. Containers have a read-only root filesystem, bounded writable temporary storage, all Linux capabilities dropped, and `no-new-privileges` enabled.
 
-- **[Rootless Docker](https://docs.docker.com/engine/security/rootless/):** container UID `0` maps to an unprivileged host user
-- **[gVisor](https://github.com/google/gvisor):** `runsc` places a user-space kernel between the workload and the host kernel interface
-- **Explicit container policy:** all Linux capabilities dropped, `no-new-privileges`, and a read-only root filesystem
-- **Bounded writable paths:** `/runtime` is a 1 GiB `exec,nosuid,nodev` tmpfs (OMP loads its extracted native addon from there) and `/tmp` is a 64 MiB `nosuid,nodev` tmpfs
-- **Ephemeral OMP home:** OMP receives a transaction-local writable home. No live container, writable OMP home, or active-state marker is reused
-
-CPU, memory, and PID cgroup limits are intentionally disabled. Rootless `runsc` cannot create systemd cgroups on cgroup-v2 hosts due to [gVisor issue #11543](https://github.com/google/gvisor/issues/11543). Rootless Docker, gVisor syscall isolation, dropped capabilities, `no-new-privileges`, read-only roots, bounded tmpfs mounts, and process timeouts remain enforced.
-
-### 2. Filesystem scoping and workspace continuity
-
-A profile grants exact host paths. Mounts are administrator-controlled policy, not agent input.
-
-- Profiles permit read-only (`ro`) and read-write (`rw`) bind mounts explicitly
-- Managed workspace continuity uses caller-owned, SHA-256-verified tar archives only
-- Restore and capture reject traversal paths, unsafe links, device nodes, FIFOs, unsupported entries, and archives larger than 512 MiB
-- Captures stream into a private local temporary file, are revalidated against the restore policy, and are returned to the caller for durable upload
-- Bind mounts inside the managed workdir are excluded from captures so host-mounted material is not republished as workspace data
-
-### 3. Network and output boundaries
-
-Managed OMP containers and Doctor probes use Docker bridge networking. Disposable Python execution is network-disabled.
-
-- A profile may explicitly expose a declared host service as `http://10.200.200.1:<port>`. The setup script adds that `lo` alias and a per-port `systemd-socket-proxyd` to `127.0.0.1:<port>` (ports from `HOST_SERVICE_PORTS`, default `11434`), so only declared ports are reachable and host services stay loopback-bound
-- The runtime does not install firewall rules, enforce an egress allowlist, or isolate the host LAN
-- Managed OMP runs time out after 300 seconds
-- Prompt images are limited to 32 MiB combined
-- Retained stdout and stderr are limited to 4 MiB combined
+Profiles are trusted administrator policy. Prefer read-only mounts and grant only the secrets and services a task needs. Workspace archives are checked for unsafe paths, links, and file types. Host mounts inside the workspace are excluded from captures.
 
 ```mermaid
 flowchart TD
-    HostApp["Host application<br/>request, storage, UI"] -->|SandboxInvocation| Facade[Sandbox]
-    Facade -->|one transaction| Runtime[SandboxRuntime]
-
-    subgraph Policy[Administrator-controlled profile]
-        Profile["image, mounts, environment<br/>host services, interpreters"]
-    end
-
-    Profile --> Runtime
-    ArchiveIn["Caller-downloaded<br/>verified workspace archive"] --> Runtime
+    App[Host application or CLI] --> Runtime[Sandbox runtime]
+    Profile["Trusted profile<br/>mounts, environment, host services"] --> Runtime
 
     subgraph Isolation[Rootless Docker and gVisor]
-        Container[Fresh read-only container]
-        OMP[OMP process]
-        Workspace["/runtime/active<br/>managed workspace"]
-        OMPHome["/runtime/omp-home<br/>ephemeral OMP home"]
-        Container --> OMP
-        OMP <--> Workspace
-        OMP --> OMPHome
+        subgraph Container[Fresh container with read-only root]
+            OMP[OMP process]
+            Workspace[Managed workspace]
+            Home[Ephemeral OMP home]
+            OMP <--> Workspace
+            OMP --> Home
+        end
     end
 
-    Runtime -->|create, start, remove| Container
-    Runtime -->|optional bridge networking| Services[Declared host services]
-    Runtime -->|capture archive + manifest| HostApp
+    Runtime -->|create, run, remove| Container
+    Archive[Verified workspace archive] -->|restore| Workspace
+    Workspace -->|capture archive and manifest| App
+    Mounts[Profile-declared host paths] <-->|read-only or read-write mounts| OMP
+    OMP <-->|bridge networking| Network["Declared host services and network<br/>no enforced egress allowlist"]
 ```
+
+---
+ 
+## Setup
+
+Requires Python 3.10+, `uv`, a user systemd session, and `curl`, `tar`, `zstd`, and `sha512sum`. The setup script supports Debian, Ubuntu, and Arch Linux on `x86_64` and `aarch64`.
+
+```bash
+uv sync
+./scripts/setup_agent_sandbox.sh
+```
+
+Setup installs or reuses rootless Docker, verifies and configures gVisor, builds the sandbox image, and configures access to declared host services. It uses `sudo` for host-level setup when needed.
+
+Setup targets the current user's Docker socket at `/run/user/<uid>/docker.sock`. It leaves any rootful Docker service running and preserves unrelated settings in `~/.config/docker/daemon.json`, backing up the file before adding the `runsc` runtime.
+
+Before running, copy the [bundled profile](src/agent_sandbox/profiles/gigachad.yaml) to an administrator-controlled directory as `example.yaml`. Set its `name` to `example` and adjust its absolute paths, mounts, and credentials for your machine. Mount the actual OMP executable, not a launcher such as a `mise` shim.
+
+```bash
+export AGENT_SANDBOX_PROFILE_PATH="/absolute/path/to/profiles"
+uv run agent-sandbox doctor --profile example
+```
+
+Doctor checks Docker, gVisor, the image, mounts, OMP, interpreters, instructions, and declared services. It stops at the first failing stage.
+
+<details>
+<summary>Profile fields and local model access</summary>
+
+Profiles are strict YAML files named `<profile>.yaml`. `AGENT_SANDBOX_PROFILE_PATH` accepts colon-separated directories, searched before bundled profiles.
+
+| Field | Purpose |
+| --- | --- |
+| `name`, `image`, `workdir` | Profile identity, Docker image, and absolute working directory |
+| `mounts` | Explicit host paths with container targets and `ro` or `rw` access |
+| `omp_binary` | Path to the OMP executable inside the container |
+| `python_interpreters` | Optional labels mapped to interpreter paths inside the container |
+| `env_passthrough` | Optional host environment variables to forward |
+| `host_services` | Optional environment-variable names mapped to host service ports |
+
+For local inference, `host_services: {OLLAMA_HOST: 11434}` exposes Ollama as `http://10.200.200.1:11434`. The host service stays bound to `127.0.0.1`. Setup creates the loopback alias and per-port systemd proxies, defaulting to port `11434`.
+
+To expose additional profile-declared ports, or configure an existing installation:
+
+```bash
+HOST_SERVICE_PORTS="11434 8080" ./scripts/setup_host_services.sh
+```
+
+</details>
 
 ---
 
 ## Usage
 
-### 1. Install and diagnose
+### CLI
 
-The setup script supports Debian, Ubuntu, and Arch Linux on `x86_64` or `aarch64`. It requires a user systemd session. It uses `sudo` only when it must install rootless Docker packages, configure subordinate IDs, or install the host-service loopback alias.
-
-```bash
-uv sync
-./scripts/setup_agent_sandbox.sh
-uv run agent-sandbox doctor --profile gigachad
-```
-
-The setup script installs or reuses rootless Docker, downloads and SHA-512-verifies `runsc`, registers it with `--ignore-cgroups`, restarts the user Docker service, and builds `agent-sandbox:trixie`. This avoids gVisor issue [#11543](https://github.com/google/gvisor/issues/11543) on cgroup-v2 hosts. It finishes by running `setup_host_services.sh`.
-
-`scripts/setup_host_services.sh` bridges loopback-only host services into containers. Rootless Docker blocks container access to host `127.0.0.1`, so the script installs a persistent `lo` alias `10.200.200.1` (system unit `agent-sandbox-host-alias.service`) and one user socket unit `agent-sandbox-host-<port>.socket` per port that proxies `10.200.200.1:<port>` to `127.0.0.1:<port>`. Services keep binding to `127.0.0.1` only. It is idempotent and can be run alone on an existing install. `HOST_SERVICE_PORTS` must cover every port under the profile's `host_services` (default `11434` for Ollama):
+Run a task and save its workspace and session manifest. Output directories must already exist.
 
 ```bash
-./scripts/setup_host_services.sh
-HOST_SERVICE_PORTS="11434 8080" ./scripts/setup_host_services.sh
+mkdir -p artifacts
+uv run agent-sandbox omp "Summarize the current workspace." \
+  --profile example \
+  --workspace-out artifacts/workspace.tar \
+  --manifest-out artifacts/manifest.json
 ```
 
-Profiles mount the OMP executable itself, not a launcher. A wrapper such as a `mise` shim fails inside the image. With mise, mount `~/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp`, which follows upgrades.
+To continue the session, supply both saved files:
 
-Doctor exits `0` only when every check passes. It runs in stages and stops after the first stage with a failure: Docker environment (rootless mode, registered `runsc`, profile image) with the required cgroup bypass, then declared mount sources, then one `runsc` container start, then OMP, Python interpreters, `AGENTS.md`, and declared host services.
+```bash
+uv run agent-sandbox omp "Continue the workspace." \
+  --profile example \
+  --workspace-in artifacts/workspace.tar \
+  --manifest-in artifacts/manifest.json \
+  --workspace-out artifacts/next-workspace.tar \
+  --manifest-out artifacts/next-manifest.json
+```
 
-### 2. Run a managed OMP invocation
+Use `--model`, `--thinking`, `--append-system`, and `--lean` for per-run options. See `uv run agent-sandbox omp --help` for all flags. The command prints status, summary, and output events. Exit codes are `0` for completion, `1` for a non-completed result after saving outputs, and `2` for invalid inputs or sandbox errors.
 
-The caller supplies stable request identity and, where needed, a workspace archive it has already downloaded. The caller uploads the returned capture and persists the returned manifest.
+### Python API
+
+The library is the primary integration for applications that manage their own requests and storage.
 
 ```python
 from agent_sandbox import OmpTask, Sandbox, SandboxInvocation
@@ -117,57 +138,39 @@ from agent_sandbox import OmpTask, Sandbox, SandboxInvocation
 sandbox = Sandbox(namespace="tenant-a")
 invocation = SandboxInvocation(
     slot_key="workspace-42",
-    profile_name="gigachad",
-    run_id="request-2026-09-19-01",
-    task=OmpTask("Summarize the current workspace.", model="provider/model", lean=True),
+    profile_name="example",
+    run_id="request-001",
+    task=OmpTask("Summarize the current workspace.", lean=True),
 )
 
 with sandbox.run(invocation) as result:
-    upload_capture(result.workspace.path, result.workspace.sha256)
-    persist_manifest(result.next_manifest)
     print(result.status, result.summary)
     print(result.outputs)
+    # Persist result.workspace and result.next_manifest here.
+    # The local workspace archive is deleted when this block exits.
 ```
 
-`OmpTask` carries the prompt and its per-run options: `prompt_images` (a tuple of `PromptImage`), `model`, `thinking`, `append_system`, and `lean`. `slot_key` and `run_id` provide in-process idempotency within one `Sandbox` instance. Releasing the returned `SandboxRun`, either explicitly or through the context manager, removes its local capture and evicts that cached result.
+The caller owns storage. Save the archive at `result.workspace.path` with its `sha256` and the returned `next_manifest` before releasing the run.
 
-To restore a workspace, pass `workspace=WorkspaceArchive(path, sha256)` for the caller-downloaded archive. `WorkspaceArchive.from_file(path)` validates a local archive and pins its current digest. To resume the OMP session as well, also pass the prior manifest as `active_manifest`. Its workspace digest must match the archive, and its runtime fingerprint must match the current profile and image.
+<details>
+<summary>Restoring workspaces and managing results</summary>
 
-The returned manifest is storage-neutral and `result.workspace` is a local temporary archive. While the run is retained, `SandboxRun.read_workspace_file()` safely validates the capture and reads one bounded regular workspace file, such as `plot.json`. Call `release()` only after the caller has persisted the data it needs.
+- **Restore files:** pass `workspace=WorkspaceArchive(path, sha256)` with a caller-downloaded archive. `WorkspaceArchive.from_file(path)` validates a local archive and records its digest.
+- **Resume the session:** also pass the previous manifest as `active_manifest`. Its archive digest, profile, and image must match.
+- **Read an artifact:** `result.read_workspace_file()` safely reads a bounded regular file from the captured workspace while the result is retained.
+- **Release:** exiting the context manager, or calling `result.release()`, removes the temporary capture and cached result. `slot_key` and `run_id` provide in-process idempotency within one `Sandbox` instance.
+- **Task options:** `OmpTask` accepts `prompt_images` (a tuple of `PromptImage`), `model`, `thinking`, `append_system`, and `lean`.
+- **Errors:** sandbox failures derive from `AgentSandboxError`. Invalid invocation inputs raise `ValueError` or `TypeError`.
 
-Every caller-facing failure is an `AgentSandboxError`: `ProfileError`, `SecurityEnvironmentError`, `ContainerRuntimeError`, `ArchiveError`, or `PythonScriptError`. Invalid invocation inputs raise `ValueError` or `TypeError` at construction.
+</details>
 
-### 3. Run OMP through the standalone wrapper
 
-Library use remains the primary integration. The `agent-sandbox omp` command is available for a single profiled run when files are the integration boundary. Its required `--workspace-out` and `--manifest-out` paths receive the workspace capture and native JSON manifest. Their parent directories must already exist.
+---
 
-```bash
-mkdir -p artifacts
 
-agent-sandbox omp "Summarize the current workspace." \
-  --profile gigachad \
-  --slot-key workspace-42 \
-  --run-id request-2026-09-19-01 \
-  --workspace-out artifacts/workspace.tar \
-  --manifest-out artifacts/manifest.json
-```
+### Isolated Python
 
-To resume, pass both prior outputs as inputs. `--manifest-in` requires `--workspace-in`.
-
-```bash
-agent-sandbox omp "Continue the workspace." \
-  --profile gigachad \
-  --workspace-in artifacts/workspace.tar \
-  --manifest-in artifacts/manifest.json \
-  --workspace-out artifacts/next-workspace.tar \
-  --manifest-out artifacts/next-manifest.json
-```
-
-The command persists the returned capture and JSON manifest before releasing the local run. It prints `status`, `summary`, and serialized output events. A returned status other than `completed` exits with code `1` after those files are written. Invalid inputs and sandbox failures exit with code `2` and a one-line error.
-
-### 4. Run a small isolated Python task
-
-Choose a profile-defined interpreter label, never a host interpreter path.
+Choose an interpreter label declared in the profile, not a host executable path. Each script runs in a fresh, read-only, network-disabled container.
 
 ```python
 from agent_sandbox import Sandbox
@@ -176,58 +179,22 @@ output = Sandbox().run_python_script(
     "venv",
     "print('hello from the sandbox')",
     timeout=30,
-    profile_name="gigachad",
+    profile_name="example",
 )
 print(output)
 ```
 
-This path starts a fresh, read-only, network-disabled container and removes it after execution.
+<details>
+<summary>Runtime limits</summary>
 
----
-
-## Profiles
-
-Profiles are strict YAML files named `<profile>.yaml`. The loader searches the colon-separated `AGENT_SANDBOX_PROFILE_PATH` before bundled profiles. `gigachad.yaml` is an example for one workstation. Copy it into an administrator-controlled location and replace its absolute paths for a different machine.
-
-```yaml
-name: example
-image: agent-sandbox:trixie
-workdir: /workspace
-mounts:
-  - source: /absolute/host/path/to/omp
-    target: /usr/local/bin/omp
-    mode: ro
-  - source: /absolute/host/path/to/project-instructions
-    target: /workspace/AGENTS.md
-    mode: ro
-omp_binary: /usr/local/bin/omp
-python_interpreters:
-  venv: /opt/example-venv/bin/python3
-env_passthrough:
-  - OPENAI_API_KEY
-host_services:
-  OLLAMA_HOST: 11434
-```
-
-Required fields are `name`, `image`, `workdir`, `mounts`, and `omp_binary`. Optional fields are `python_interpreters`, `env_passthrough`, and `host_services`.
-
-Profile validation rejects duplicate YAML keys, unknown fields, unsafe names, non-absolute paths, conflicting mount targets, mounts into runtime-owned paths, invalid environment names, and invalid host-service ports. The runtime fingerprint combines the validated profile, static runtime policy, and Docker-resolved image ID. A changed profile or image prevents restoration from a prior manifest.
-
-> Treat profiles as trusted administrator policy. A profile can deliberately grant a secret, writable host directory, or reachable host service. Use read-only mounts whenever possible and grant only the environment variables and services required by the workload.
-
----
-
-## Limits and operational boundaries
-
-| Boundary | Policy |
+| Boundary | Limit |
 | --- | --- |
-| Managed OMP timeout | 300 seconds |
-| Prompt-image payload | 32 MiB combined |
-| Retained OMP output | 4 MiB combined |
-| Workspace restore and capture archive | 512 MiB |
-| `append_system` text | 64 KiB |
-| `/runtime` tmpfs | 1 GiB |
-| `/tmp` tmpfs | 64 MiB |
-| Container CPU, memory, and PIDs | Unbounded by this project |
+| OMP execution | 300 seconds |
+| Prompt images | 32 MiB combined |
+| Retained stdout and stderr | 4 MiB combined |
+| Workspace archive | 512 MiB |
+| `append_system` | 64 KiB |
+| `/runtime` and `/tmp` tmpfs | 1 GiB and 64 MiB respectively |
+| Container CPU, memory, and PIDs | No cgroup limits |
 
-Agents-in-a-Box reduces risk. It does not make trusted mounts, forwarded secrets, configured host services, or bridge-network reachability safe by itself. The host application must decide what to persist, expose, and authorize.
+</details>
