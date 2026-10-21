@@ -134,15 +134,11 @@ def _check_agents_md(runtime: SandboxRuntime, profile: Profile) -> CheckResult:
 def _check_host_services(runtime: SandboxRuntime, profile: Profile) -> list[CheckResult]:
     """Confirm each bridged host daemon answers from inside a sandbox container."""
     host = HOST_SERVICE_ADDRESS
-    interpreter = next(iter(profile.python_interpreters.values()), None)
-    if interpreter is None:
-        return [CheckResult(name, False, "profile declares no python_interpreters to probe with") for name in profile.host_services]
     results = []
     for name, port in profile.host_services.items():
         url = f"http://{host}:{port}"
-        script = f"import socket; socket.create_connection(('{host}', {port}), timeout=5).close(); print('ok')"
         try:
-            runtime.run_probe([interpreter, "-c", script])
+            runtime.run_probe(["timeout", "5", "bash", "-c", f"exec 3<>/dev/tcp/{host}/{port}"])
             results.append(CheckResult(name, True, f"host service reachable at {url}"))
         except _PROBE_ERRORS as e:
             detail = (

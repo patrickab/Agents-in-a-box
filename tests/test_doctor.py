@@ -174,7 +174,7 @@ class TestRunDoctor(unittest.TestCase):
         self.assertEqual(_check_environment(runtime), CheckResult("docker-environment", False, "Docker daemon is not rootless"))
 
     def test_host_services_probe_each_port_and_explain_failures(self) -> None:
-        profile = Profile("p", "img", "/workspace", (), "/omp", python_interpreters={"venv": "/py"}, host_services={"A": 1, "B": 2})
+        profile = Profile("p", "img", "/workspace", (), "/omp", host_services={"A": 1, "B": 2})
         runtime = MagicMock()
         runtime.run_probe.side_effect = [None, ContainerRuntimeError("probe exited 1")]
 
@@ -182,11 +182,3 @@ class TestRunDoctor(unittest.TestCase):
 
         self.assertEqual([(result.name, result.passed) for result in results], [("A", True), ("B", False)])
         self.assertIn("setup_host_services.sh", results[1].detail)
-        self.assertEqual(runtime.run_probe.call_args_list[0].args[0][0], "/py")
-
-    def test_host_services_without_interpreter_fail_without_probing(self) -> None:
-        runtime = MagicMock()
-        profile = Profile("p", "img", "/workspace", (), "/omp", host_services={"A": 1})
-
-        self.assertEqual([result.passed for result in _check_host_services(runtime, profile)], [False])
-        runtime.run_probe.assert_not_called()
