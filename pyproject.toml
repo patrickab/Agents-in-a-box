@@ -26,6 +26,15 @@ build-backend = "hatchling.build"
 [project.scripts]
 agent-sandbox = "agent_sandbox.cli:main"
 
+[project.optional-dependencies]
+factory = [
+    "dbos>=3.3.0",
+    "fastapi>=0.156.3",
+    "psycopg[binary]>=3.3.6",
+    "pydantic>=2",
+    "uvicorn>=0.54.0",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_sandbox"]
 
@@ -55,5 +64,11 @@ section-order = ["standard-library", "third-party", "first-party", "local-folder
 
 [dependency-groups]
 dev = [
+    "agent-sandbox[factory]",
+    "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "ruff>=0.17.1",
 ]
+
+[tool.uv.sources]
+agent-sandbox = { workspace = true }

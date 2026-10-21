@@ -66,6 +66,16 @@ def _cmd_omp(args: argparse.Namespace) -> int:
     return 0 if result.status == "completed" else 1
 
 
+def _cmd_factory_serve(args: argparse.Namespace) -> int:
+    """Run the agent factory engine."""
+    try:
+        from agent_sandbox.factory.server import serve
+    except ImportError as error:
+        raise ValueError(f"the factory engine needs the 'factory' extra: pip install 'agent-sandbox[factory]' ({error})") from error
+    serve(args.config)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="agent-sandbox", description="Rootless-Docker/gVisor sandbox runtime.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -88,6 +98,14 @@ def main(argv: list[str] | None = None) -> None:
     omp_parser.add_argument("--append-system")
     omp_parser.add_argument("--lean", action="store_true")
     omp_parser.set_defaults(func=_cmd_omp)
+
+    factory_parser = subparsers.add_parser("factory", help="Run the agent factory engine.")
+    factory_subparsers = factory_parser.add_subparsers(dest="factory_command", required=True)
+    serve_parser = factory_subparsers.add_parser("serve", help="Serve the factory HTTP API and run its workflows.")
+    serve_parser.add_argument(
+        "--config", help="Engine config path (default: $AGENT_SANDBOX_FACTORY_CONFIG or ~/.config/agent-sandbox/factory.yaml)."
+    )
+    serve_parser.set_defaults(func=_cmd_factory_serve)
 
     args = parser.parse_args(argv)
     try:

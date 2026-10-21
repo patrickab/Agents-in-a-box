@@ -1,0 +1,27 @@
+name: factory-default
+image: agent-sandbox:trixie
+workdir: /workspace
+mounts:
+  # The host wrapper invokes mise, unavailable inside the sandbox image.
+  - source: /home/noob/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp
+    target: /usr/local/bin/omp
+    mode: ro
+  - source: /home/noob/.omp
+    target: /root/.omp
+    mode: ro
+  - source: /home/noob/.agents/AGENTS.md
+    target: /workspace/AGENTS.md
+    mode: ro
+omp_binary: /usr/local/bin/omp
+env_passthrough:
+  - OPENAI_API_KEY
+  - OPENROUTER_API_KEY
+  - GEMINI_API_KEY
+  - DEEPSEEK_API_KEY
+  - TAVILY_API_KEY
+  - BRAVE_API_KEY
+  - NVIDIA_NIM_API_KEY
+  - OLLAMA_API_KEY
+host_services:
+  # Reach the host Ollama daemon on its default port so ollama/* models resolve.
+  OLLAMA_HOST: 11434
