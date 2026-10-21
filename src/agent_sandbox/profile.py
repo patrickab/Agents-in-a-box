@@ -53,6 +53,11 @@ class Profile:
         object.__setattr__(self, "python_interpreters", MappingProxyType(dict(sorted(self.python_interpreters.items()))))
         object.__setattr__(self, "host_services", MappingProxyType(dict(sorted(self.host_services.items()))))
 
+    def workdir_mount_paths(self) -> tuple[str, ...]:
+        """Return the workdir-relative paths of mounts inside the workdir; they are neither restored nor captured."""
+        prefix = self.workdir.rstrip("/") + "/"
+        return tuple(sorted({mount.target[len(prefix) :] for mount in self.mounts if mount.target.startswith(prefix)}))
+
     @cached_property
     def runtime_fingerprint(self) -> str:
         """Return the canonical runtime identity without reading secret values."""

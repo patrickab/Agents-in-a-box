@@ -31,7 +31,9 @@ def runtime_resource_names(namespace: str | None = None) -> RuntimeResourceNames
     return RuntimeResourceNames(prefix, f"/tmp/{prefix}.lock")
 
 
-MANAGED_OMP_TIMEOUT_SECONDS = 300
+DEFAULT_OMP_TIMEOUT_SECONDS = 300
+MIN_TIMEOUT_SECONDS = 1
+MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_APPEND_SYSTEM_BYTES = 64 * 1024
 MAX_PROMPT_IMAGE_BYTES = 32 * 1024 * 1024
 MAX_RETAINED_OUTPUT_BYTES = 4 * 1024 * 1024

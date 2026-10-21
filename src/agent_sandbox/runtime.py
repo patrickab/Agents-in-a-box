@@ -13,6 +13,7 @@ import hashlib
 import math
 import os
 from pathlib import PurePosixPath
+import shlex
 import tempfile
 import threading
 
@@ -23,7 +24,6 @@ from agent_sandbox.archive import WorkspaceArchive, verify_archive
 from agent_sandbox.config import (
     DOCKER_HOST,
     HOST_SERVICE_ADDRESS,
-    MANAGED_OMP_TIMEOUT_SECONDS,
     MAX_RETAINED_OUTPUT_BYTES,
     MAX_WORKSPACE_ARCHIVE_BYTES,
     RUNTIME_TMPFS_SIZE,
@@ -48,6 +48,8 @@ _PROMPT_IMAGES_DIR = "/runtime/prompt-images"
 _APPEND_SYSTEM_DIR = "/runtime/append-system"
 _APPEND_SYSTEM_PATH = f"{_APPEND_SYSTEM_DIR}/APPEND_SYSTEM.md"
 _OMP_HOME = "/runtime/omp-home"
+# Host-only bulk omp never reads in a sandbox (session history, browser downloads, stats); copying it overflows the tmpfs.
+_OMP_HOME_SKIPPED = ("agent/sessions", "puppeteer", "stats.db", "stats.db-shm", "stats.db-wal")
 _RESTORE_ARCHIVE_PATH = "/runtime/restore-archive.tar"
 _TIMEOUT_EXIT_CODES = frozenset({124, 137})  # timeout(1) and SIGKILL.
 _runtime_thread_locks: dict[str, threading.Lock] = {}
@@ -269,12 +271,12 @@ class SandboxRuntime:
                     self._prepare_container(container, restoring=restore is not None)
                     exec_result = _stream_container_exec(
                         container,
-                        ["timeout", "--signal=KILL", f"{MANAGED_OMP_TIMEOUT_SECONDS}s", *argv],
+                        ["timeout", "--signal=KILL", f"{task.timeout_s}s", *argv],
                         workdir=INTERNAL_WORKDIR,
                         environment=self._omp_environment(),
                     )
                     if exec_result.exit_code in _TIMEOUT_EXIT_CODES:
-                        raise ContainerRuntimeError(f"OMP execution exceeded {MANAGED_OMP_TIMEOUT_SECONDS}s limit")
+                        raise ContainerRuntimeError(f"OMP execution exceeded {task.timeout_s}s limit")
                     capture = self._capture_workspace(container)
             except BaseException:
                 if capture is not None:  # Only container removal can fail after capture.
@@ -391,16 +393,29 @@ class SandboxRuntime:
         path = ":".join([*dict.fromkeys(bin_dirs), "/usr/local/bin", "/usr/bin", "/bin"])
         return {**self._environment(), "HOME": _OMP_HOME, "PATH": path}
 
-    @staticmethod
-    def _prepare_container(container: Container, *, restoring: bool) -> None:
-        """Create the workspace, extract any mounted restore archive, and seed a writable OMP home."""
+    def _prepare_container(self, container: Container, *, restoring: bool) -> None:
+        """Create the workspace, extract any mounted restore archive, and prepare a writable home."""
         steps = [f"mkdir -p {INTERNAL_WORKDIR}"]
         if restoring:
-            steps.append(
-                f"tar --extract --file={_RESTORE_ARCHIVE_PATH} --directory={INTERNAL_WORKDIR} --no-same-owner --no-same-permissions"
-            )
+            skipped = [
+                f"--exclude={shlex.quote(prefix + path)}" for path in self.profile.workdir_mount_paths() for prefix in ("./", "")
+            ]
+            extract = [
+                "tar",
+                "--extract",
+                f"--file={_RESTORE_ARCHIVE_PATH}",
+                f"--directory={INTERNAL_WORKDIR}",
+                "--no-same-owner",
+                "--no-same-permissions",
+                "--anchored",
+                "--no-wildcards",
+                *skipped,
+            ]
+            steps.append(" ".join(extract))
         steps.append(f"rm -rf {_OMP_HOME} && mkdir -p {_OMP_HOME}/.omp")
-        steps.append(f"{{ [ ! -d /root/.omp ] || cp -a /root/.omp/. {_OMP_HOME}/.omp/; }}")
+        omp_skipped = " ".join(f"--exclude=./{path}" for path in _OMP_HOME_SKIPPED)
+        seed = f"tar -C /root/.omp --anchored --no-wildcards {omp_skipped} -cf - . | tar -C {_OMP_HOME}/.omp -xf -"
+        steps.append(f"{{ [ ! -d /root/.omp ] || {{ {seed}; }}; }}")
         command = " && ".join(steps)
         result = _stream_container_exec(container, ["sh", "-c", command])
         if result.exit_code != 0:
@@ -408,15 +423,9 @@ class SandboxRuntime:
                 f"container setup failed (exit {result.exit_code}): {command}\n{result.stdout or result.stderr}"
             )
 
-    def _captured_exclusions(self) -> list[str]:
-        """Return workspace-relative bind-mount paths to omit from a snapshot."""
-        prefix = INTERNAL_WORKDIR + "/"
-        targets = (self._rewrite_target(mount.target) for mount in self.profile.mounts)
-        return sorted({target[len(prefix) :] for target in targets if target.startswith(prefix)})
-
     def _capture_workspace(self, container: Container) -> WorkspaceArchive:
         """Stream a bounded tar snapshot to a private file, then validate and pin it."""
-        exclusions = [f"--exclude=./{path}" for path in self._captured_exclusions()]
+        exclusions = [f"--exclude=./{path}" for path in self.profile.workdir_mount_paths()]
         command = ["tar", "-C", INTERNAL_WORKDIR, "--anchored", "--no-wildcards", *exclusions, "-cf", "-", "."]
         descriptor, archive_path = tempfile.mkstemp(suffix=".tar", prefix="agent-sandbox-snapshot-")
         try:

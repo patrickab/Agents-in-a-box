@@ -252,6 +252,7 @@ class TestInvocationValidation(unittest.TestCase):
             {"prompt": "task", "prompt_images": [PromptImage("image.png", b"image")]},
             {"prompt": "task", "prompt_images": (("image.png", b"image"),)},
             {"prompt": "task", "prompt_images": (PromptImage("a.png", b"1"), PromptImage("a.png", b"2"))},
+            {"prompt": "task", "timeout_s": 0},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
                 OmpTask(**kwargs)

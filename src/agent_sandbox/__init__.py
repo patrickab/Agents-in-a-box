@@ -1,6 +1,6 @@
 """Expose the profiled rootless Docker and gVisor sandbox runtime."""
 
-from agent_sandbox.archive import WorkspaceArchive
+from agent_sandbox.archive import WorkspaceArchive, extract_archive
 from agent_sandbox.errors import (
     AgentSandboxError,
     ArchiveError,
@@ -32,6 +32,7 @@ __all__ = [
     "SecurityEnvironmentError",
     "StreamEvent",
     "WorkspaceArchive",
+    "extract_archive",
     "load_profile",
     "manifest_from_dict",
     "manifest_to_dict",

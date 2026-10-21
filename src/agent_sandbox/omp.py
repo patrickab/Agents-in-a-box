@@ -7,7 +7,13 @@ from pathlib import PurePosixPath
 from typing import Literal, TypeAlias
 
 from agent_sandbox._validation import require_nonempty_string, require_optional_string
-from agent_sandbox.config import MAX_APPEND_SYSTEM_BYTES, MAX_PROMPT_IMAGE_BYTES
+from agent_sandbox.config import (
+    DEFAULT_OMP_TIMEOUT_SECONDS,
+    MAX_APPEND_SYSTEM_BYTES,
+    MAX_PROMPT_IMAGE_BYTES,
+    MAX_TIMEOUT_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+)
 
 _LEAN_FLAGS = ("--no-lsp", "--no-skills", "--no-rules", "--no-extensions")
 
@@ -37,12 +43,17 @@ class OmpTask:
     thinking: str | None = None
     append_system: str | None = None
     lean: bool = False  # Skip LSP, skill, rule, and extension discovery.
+    timeout_s: int = DEFAULT_OMP_TIMEOUT_SECONDS  # Wall-clock limit for this run.
 
     def __post_init__(self) -> None:
         require_nonempty_string("prompt", self.prompt)
         require_optional_string("model", self.model)
         require_optional_string("thinking", self.thinking)
         require_optional_string("append_system", self.append_system)
+        if isinstance(self.timeout_s, bool) or not isinstance(self.timeout_s, int):
+            raise TypeError("timeout_s must be an integer")
+        if not MIN_TIMEOUT_SECONDS <= self.timeout_s <= MAX_TIMEOUT_SECONDS:
+            raise ValueError(f"timeout_s must be between {MIN_TIMEOUT_SECONDS} and {MAX_TIMEOUT_SECONDS} seconds")
         if self.append_system is not None and len(self.append_system.encode("utf-8")) > MAX_APPEND_SYSTEM_BYTES:
             raise ValueError(f"append_system must not exceed {MAX_APPEND_SYSTEM_BYTES} bytes")
         if not isinstance(self.prompt_images, tuple) or not all(isinstance(image, PromptImage) for image in self.prompt_images):

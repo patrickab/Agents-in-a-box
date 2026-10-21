@@ -321,6 +321,25 @@ class TestManagedTransaction(unittest.TestCase):
         self.assertEqual(client.containers.create.call_args.kwargs["mounts"][0]["Target"], f"{INTERNAL_WORKDIR}/AGENTS.md")
 
 
+@patch("agent_sandbox.runtime._runtime_lease", return_value=nullcontext())
+class TestOmpTimeout(unittest.TestCase):
+    def test_omp_execution_uses_the_task_timeout(self, _lease: MagicMock) -> None:
+        container = _Container(_plans())
+        runtime, _client = _runtime(container)
+
+        with patch("agent_sandbox.runtime.build_omp_argv", return_value=["omp", "go"]):
+            result = runtime.execute(OmpTask("go", timeout_s=7))
+        self.addCleanup(Path(result.workspace.path).unlink, missing_ok=True)
+        self.assertEqual(container.api.commands[1][:3], ["timeout", "--signal=KILL", "7s"])
+
+        timed_out_runtime, _client = _runtime(_Container([([], 0), ([], 124)]))
+        with (
+            patch("agent_sandbox.runtime.build_omp_argv", return_value=["omp", "go"]),
+            self.assertRaisesRegex(ContainerRuntimeError, "OMP execution exceeded 9s limit"),
+        ):
+            timed_out_runtime.execute(OmpTask("go", timeout_s=9))
+
+
 class TestProbe(unittest.TestCase):
     def test_probe_runs_in_a_hardened_container_with_profile_mounts(self) -> None:
         container = _Container([([(b"ok\n", None)], 0)])
