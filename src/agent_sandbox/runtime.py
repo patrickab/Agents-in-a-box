@@ -48,8 +48,9 @@ _PROMPT_IMAGES_DIR = "/runtime/prompt-images"
 _APPEND_SYSTEM_DIR = "/runtime/append-system"
 _APPEND_SYSTEM_PATH = f"{_APPEND_SYSTEM_DIR}/APPEND_SYSTEM.md"
 _OMP_HOME = "/runtime/omp-home"
-# Host-only bulk omp never reads in a sandbox (session history, browser downloads, stats); copying it overflows the tmpfs.
-_OMP_HOME_SKIPPED = ("agent/sessions", "puppeteer", "stats.db", "stats.db-shm", "stats.db-wal")
+# Host-only bulk omp never reads in a sandbox (session history, browser downloads, daemon sockets and browser
+# profile under run/, stats); copying it overflows the tmpfs.
+_OMP_HOME_SKIPPED = ("agent/sessions", "puppeteer", "run", "stats.db", "stats.db-shm", "stats.db-wal")
 _RESTORE_ARCHIVE_PATH = "/runtime/restore-archive.tar"
 _TIMEOUT_EXIT_CODES = frozenset({124, 137})  # timeout(1) and SIGKILL.
 _runtime_thread_locks: dict[str, threading.Lock] = {}

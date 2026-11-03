@@ -13,7 +13,7 @@ By default this means:
 *   **Nearly unrestricted filesystem access**
 *   **Unrestricted network access**
 
-While coding agents typically ask for permission or filter auto-approval for harmful commands, they can technically send any user-accessible (private) data to any publicly accessible domain, download & install arbitrary software in the userspace or execute arbitrary code.
+While coding agents typically ask for permission or filter auto-approval for harmful commands, they can technically send any user-accessible (private) data to any publicly accessible domain, download & install arbitrary software in the userspace or execute arbitrary code. This project aims to overcome these issues using the following approaches
 
 - **Fresh containers:** each run starts clean and is removed afterward.
 - **Explicit access:** profiles define host mounts, environment variables, and local services such as Ollama.

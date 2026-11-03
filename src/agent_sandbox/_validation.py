@@ -1,7 +1,7 @@
 """Share strict validation helpers for profile, manifest, and invocation records."""
 
-from collections.abc import Mapping
 import re
+from collections.abc import Mapping
 from typing import IO, Any
 
 import yaml
