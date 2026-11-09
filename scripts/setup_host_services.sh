@@ -30,6 +30,13 @@ systemctl --user show-environment >/dev/null 2>&1 || fail "A user systemd sessio
 proxyd="$(ls /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-proxyd 2>/dev/null | head -n1 || true)"
 [[ -n "$proxyd" ]] || fail "systemd-socket-proxyd is unavailable."
 
+# A wildcard listener owns the port on every address, so the bridge cannot bind ${HOST_SERVICE_ADDRESS}:port.
+for port in $HOST_SERVICE_PORTS; do
+    if ss -Hltn "sport = :$port" | grep -qE "(0\.0\.0\.0|\*|\[::\]):$port\b"; then
+        fail "Port $port is bound to all interfaces (e.g. OLLAMA_HOST=0.0.0.0). Bind that service to 127.0.0.1 and rerun."
+    fi
+done
+
 printf 'Installing persistent loopback alias %s...\n' "$HOST_SERVICE_ADDRESS"
 sudo tee "$ALIAS_UNIT" >/dev/null <<EOF
 [Unit]
@@ -81,7 +88,7 @@ done
 ip -4 addr show dev lo | grep -q "inet ${HOST_SERVICE_ADDRESS}/32" || fail "Alias $HOST_SERVICE_ADDRESS is not on lo."
 for port in $HOST_SERVICE_PORTS; do
     # Probing the alias would always succeed: the socket-activated proxy accepts before dialing out.
-    if ss -Hltn "sport = :$port" | grep -qE "(127\.0\.0\.1|0\.0\.0\.0|\*|\[::\]):$port\b"; then
+    if ss -Hltn "sport = :$port" | grep -qE "127\.0\.0\.1:$port\b"; then
         printf 'OK   %s:%s forwards to a listening 127.0.0.1:%s\n' "$HOST_SERVICE_ADDRESS" "$port" "$port"
     else
         printf 'WARN %s:%s is bridged, but nothing listens on 127.0.0.1:%s yet\n' "$HOST_SERVICE_ADDRESS" "$port" "$port"

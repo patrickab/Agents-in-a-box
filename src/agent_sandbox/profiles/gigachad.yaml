@@ -3,25 +3,25 @@ image: agent-sandbox:trixie
 workdir: /workspace
 mounts:
   # The host wrapper invokes mise, unavailable inside the sandbox image.
-  - source: /home/noob/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp
+  - source: ${HOME}/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp
     target: /usr/local/bin/omp
     mode: ro
-  - source: /home/noob/git/gigachad-bot/.venv
-    target: /home/noob/git/gigachad-bot/.venv
+  - source: ${HOME}/git/gigachad-bot/.venv
+    target: ${HOME}/git/gigachad-bot/.venv
     mode: ro
-  - source: /home/noob/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu
-    target: /home/noob/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu
+  - source: ${HOME}/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu
+    target: ${HOME}/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu
     mode: ro
-  - source: /home/noob/.omp
+  - source: ${HOME}/.omp
     target: /root/.omp
     mode: ro
-  - source: /home/noob/.agents/AGENTS.md
+  - source: ${HOME}/.agents/AGENTS.md
     target: /workspace/AGENTS.md
     mode: ro
 omp_binary: /usr/local/bin/omp
 python_interpreters:
-  venv: /home/noob/git/gigachad-bot/.venv/bin/python3
-  uv-base: /home/noob/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3
+  venv: ${HOME}/git/gigachad-bot/.venv/bin/python3
+  uv-base: ${HOME}/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3
 env_passthrough:
   - OPENAI_API_KEY
   - OPENROUTER_API_KEY

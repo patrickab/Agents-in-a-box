@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -51,6 +52,19 @@ class TestProfileLoading(unittest.TestCase):
         self.assertEqual(dict(profile.host_services), {"OLLAMA_HOST": 11434})
         self.assertRegex(profile.runtime_fingerprint, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(profile.runtime_fingerprint, load_profile("gigachad").runtime_fingerprint)
+
+    def test_expands_home_placeholder_in_profile_paths(self) -> None:
+        with patch("pathlib.Path.home", return_value=Path("/home/alice")):
+            profile = self._load(
+                {
+                    **_profile_data(),
+                    "mounts": [{"source": "${HOME}/.omp", "target": "/root/.omp", "mode": "ro"}],
+                    "python_interpreters": {"venv": "${HOME}/venv/bin/python3"},
+                }
+            )
+
+        self.assertEqual(profile.mounts[0].source, "/home/alice/.omp")
+        self.assertEqual(profile.python_interpreters["venv"], "/home/alice/venv/bin/python3")
 
     def test_load_profile_prefers_earliest_search_directory(self) -> None:
         """Use the first matching profile from the configured search path."""

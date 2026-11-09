@@ -98,8 +98,19 @@ def load_profile(name: str) -> Profile:
         raise ProfileError(f"profile '{name}' {error}") from error
 
 
+def _expand_home(value: object) -> object:
+    """Replace `${HOME}` in every string of a parsed profile with the invoking user's home directory."""
+    if isinstance(value, str):
+        return value.replace("${HOME}", str(Path.home()))
+    if isinstance(value, list):
+        return [_expand_home(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_home(item) for key, item in value.items()}
+    return value
+
+
 def _parse_profile(name: str, data: object) -> Profile:
-    root = require_exact_fields(data, _PROFILE_FIELDS, "root", optional=_OPTIONAL_FIELDS)
+    root = require_exact_fields(_expand_home(data), _PROFILE_FIELDS, "root", optional=_OPTIONAL_FIELDS)
     if not is_safe_name(root["name"]):
         raise ValueError("name must be a safe profile name")
     if root["name"] != name:

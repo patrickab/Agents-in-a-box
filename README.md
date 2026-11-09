@@ -66,7 +66,7 @@ Setup installs or reuses rootless Docker, verifies and configures gVisor, builds
 
 Setup targets the current user's Docker socket at `/run/user/<uid>/docker.sock`. It leaves any rootful Docker service running and preserves unrelated settings in `~/.config/docker/daemon.json`, backing up the file before adding the `runsc` runtime.
 
-Before running, copy the [bundled profile](src/agent_sandbox/profiles/gigachad.yaml) to an administrator-controlled directory as `example.yaml`. Set its `name` to `example` and adjust its absolute paths, mounts, and credentials for your machine. Mount the actual OMP executable, not a launcher such as a `mise` shim.
+Before running, copy the [bundled profile](src/agent_sandbox/profiles/gigachad.yaml) to an administrator-controlled directory as `example.yaml`. Set its `name` to `example` and adjust its absolute paths, mounts, and credentials for your machine. `${HOME}` in any profile string expands to the invoking user's home directory. Mount the actual OMP executable, not a launcher such as a `mise` shim.
 
 ```bash
 export AGENT_SANDBOX_PROFILE_PATH="/absolute/path/to/profiles"
