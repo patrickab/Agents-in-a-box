@@ -3,7 +3,7 @@ image: agent-sandbox:trixie
 workdir: /workspace
 mounts:
   # The host wrapper invokes mise, unavailable inside the sandbox image.
-  - source: ${HOME}/.local/share/mise/installs/github-can1357-oh-my-pi/latest/omp
+  - source: ${HOME}/.local/share/mise/installs/oh-my-pi/latest/omp
     target: /usr/local/bin/omp
     mode: ro
   - source: ${HOME}/git/gigachad-bot/.venv
