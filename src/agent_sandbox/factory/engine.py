@@ -332,6 +332,18 @@ class Engine:
         self.store.add_event(task_id, "preview", {"status": preview.status})
         return preview
 
+    def restore_previews(self) -> None:
+        """Start the previews of every task waiting in human_review again: previews live in this process and end with it."""
+        for task in self.store.list_tasks(state="human_review"):
+            try:
+                task_config = self.task_config(task.id)
+                if not task_config.preview_enabled or task_config.preview is None or task.worktree is None:
+                    continue
+                preview = self.previews.start(task.id, Path(task.worktree), task_config.preview)
+                self.store.add_event(task.id, "preview", {"status": preview.status})
+            except Exception:
+                LOGGER.exception("restoring the preview of %s failed", task.id)
+
     def _wrong_state(self, task_id: str, action: str, allowed: str) -> ApiError:
         task = self.store.get_task(task_id)
         if task is None:

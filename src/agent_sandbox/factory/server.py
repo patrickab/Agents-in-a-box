@@ -2,6 +2,9 @@
 
 import logging
 import os
+import signal
+import sys
+import threading
 
 import uvicorn
 
@@ -24,6 +27,11 @@ def serve(config_path: str | os.PathLike[str] | None = None) -> None:
     engine = Engine(config, store, previews, DbosDispatcher())
     bind_engine(engine)
     launch_dbos(config.database_url, config.limits.in_progress, config.otel_endpoint)
+    # In the background: each preview takes its readiness wait, the API must not wait for them.
+    threading.Thread(target=engine.restore_previews, name="restore-previews", daemon=True).start()
+    # uvicorn shuts down on SIGTERM, then raises it again with this handler back in place: the default action would end the
+    # process before the cleanup below, leaving every preview process running.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         uvicorn.run(create_app(engine), host=config.host, port=config.port, log_level="info")
     finally:
