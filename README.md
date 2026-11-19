@@ -1,6 +1,6 @@
 # Agents-in-a-Box
 
-**A sandbox runtime for coding agents.** Runs [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) in disposable containers using rootless Docker and gVisor, with a Python API and CLI.
+**A sandbox runtime for coding agents.** Runs the [Pi coding agent](https://github.com/earendil-works/pi) in disposable containers using rootless Docker and gVisor, with a Python API and CLI.
 
 ---
 
@@ -16,7 +16,7 @@ By default this means:
 While coding agents typically ask for permission or filter auto-approval for harmful commands, they can technically send any user-accessible (private) data to any publicly accessible domain, download & install arbitrary software in the userspace or execute arbitrary code. This project aims to overcome these issues using the following approaches
 
 - **Fresh containers:** each run starts clean and is removed afterward.
-- **Explicit access:** profiles define host mounts, environment variables, and local services such as Ollama.
+- **Explicit access:** profiles define host mounts, environment variables, and local services such as pi-host's model gateway.
 - **Workspace continuity:** verified archives and session manifests let work continue across runs without keeping a container alive.
 - **Isolated Python:** run small scripts with a profile-defined interpreter and networking disabled.
  
@@ -36,19 +36,19 @@ flowchart TD
 
     subgraph Isolation[Rootless Docker and gVisor]
         subgraph Container[Fresh container with read-only root]
-            OMP[OMP process]
+            Pi[Pi process]
             Workspace[Managed workspace]
-            Home[Ephemeral OMP home]
-            OMP <--> Workspace
-            OMP --> Home
+            Home["Ephemeral Pi agent dir<br/>gateway models only, no credentials"]
+            Pi <--> Workspace
+            Pi --> Home
         end
     end
 
     Runtime -->|create, run, remove| Container
     Archive[Verified workspace archive] -->|restore| Workspace
     Workspace -->|capture archive and manifest| App
-    Mounts[Profile-declared host paths] <-->|read-only or read-write mounts| OMP
-    OMP <-->|bridge networking| Network["Declared host services and network<br/>no enforced egress allowlist"]
+    Mounts[Profile-declared host paths] <-->|read-only or read-write mounts| Pi
+    Pi <-->|bridge networking| Network["Declared host services and network<br/>no enforced egress allowlist"]
 ```
 
 ---
@@ -66,17 +66,17 @@ Setup installs or reuses rootless Docker, verifies and configures gVisor, builds
 
 Setup targets the current user's Docker socket at `/run/user/<uid>/docker.sock`. It leaves any rootful Docker service running and preserves unrelated settings in `~/.config/docker/daemon.json`, backing up the file before adding the `runsc` runtime.
 
-Before running, copy the [bundled profile](src/agent_sandbox/profiles/gigachad.yaml) to an administrator-controlled directory as `example.yaml`. Set its `name` to `example` and adjust its absolute paths, mounts, and credentials for your machine. `${HOME}` in any profile string expands to the invoking user's home directory. Mount the actual OMP executable, not a launcher such as a `mise` shim.
+Before running, copy the [bundled profile](src/agent_sandbox/profiles/gigachad.yaml) to an administrator-controlled directory as `example.yaml`. Set its `name` to `example` and adjust its absolute paths, mounts, and credentials for your machine. `${HOME}` in any profile string expands to the invoking user's home directory. Mount the actual Pi install directory (the `pi` binary and its sibling assets), not a launcher such as a `mise` shim.
 
 ```bash
 export AGENT_SANDBOX_PROFILE_PATH="/absolute/path/to/profiles"
 uv run agent-sandbox doctor --profile example
 ```
 
-Doctor checks Docker, gVisor, the image, mounts, OMP, interpreters, instructions, and declared services. It stops at the first failing stage.
+Doctor checks Docker, gVisor, the image, mounts, Pi, interpreters, instructions, and declared services. It stops at the first failing stage.
 
 <details>
-<summary>Profile fields and local model access</summary>
+<summary>Profile fields and model access</summary>
 
 Profiles are strict YAML files named `<profile>.yaml`. `AGENT_SANDBOX_PROFILE_PATH` accepts colon-separated directories, searched before bundled profiles.
 
@@ -84,17 +84,17 @@ Profiles are strict YAML files named `<profile>.yaml`. `AGENT_SANDBOX_PROFILE_PA
 | --- | --- |
 | `name`, `image`, `workdir` | Profile identity, Docker image, and absolute working directory |
 | `mounts` | Explicit host paths with container targets and `ro` or `rw` access |
-| `omp_binary` | Path to the OMP executable inside the container |
+| `pi_binary` | Path to the Pi executable inside the container |
 | `python_interpreters` | Optional labels mapped to interpreter paths inside the container |
 | `env_passthrough` | Optional host environment variables to forward |
-| `host_services` | Optional environment-variable names mapped to host service ports |
+| `host_services` | Optional environment-variable names mapped to host service ports; a port may be `${NAME:-default}` |
 
-For local inference, `host_services: {OLLAMA_HOST: 11434}` exposes Ollama as `http://10.200.200.1:11434`. The host service stays bound to `127.0.0.1`. Setup creates the loopback alias and per-port systemd proxies, defaulting to port `11434`.
+Pi never sees a provider credential. Every profile declares `host_services: {PI_GATEWAY_URL: "${PI_GATEWAY_PORT:-8300}"}`, the port of pi-host's OpenAI-compatible model gateway. Each run gets a fresh Pi agent dir whose `models.json` declares one provider `gateway` at `http://10.200.200.1:<port>/v1`, with one model per entry of the gateway's model list (ids `<provider>/<id>`), plus the host's `settings.json` packages and default tools. The container receives only pi-host's gateway-only token (`PI_GATEWAY_TOKEN_FILE`, default `~/.local/state/gigachad-bot/pi-gateway.token`), which pi-host accepts on `/v1/*` alone. Select a model as `--provider gateway --model <provider>/<id>`.
 
-To expose additional profile-declared ports, or configure an existing installation:
+Host services stay bound to `127.0.0.1`. Setup creates the loopback alias `10.200.200.1` and per-port systemd proxies, defaulting to the gateway ports `8300` (development) and `8301` (production), and removes proxies for ports it no longer lists. To expose additional profile-declared ports, or configure an existing installation:
 
 ```bash
-HOST_SERVICE_PORTS="11434 8080" ./scripts/setup_host_services.sh
+HOST_SERVICE_PORTS="8300 8301 8080" ./scripts/setup_host_services.sh
 ```
 
 </details>
@@ -109,7 +109,7 @@ Run a task and save its workspace and session manifest. Output directories must 
 
 ```bash
 mkdir -p artifacts
-uv run agent-sandbox omp "Summarize the current workspace." \
+uv run agent-sandbox pi "Summarize the current workspace." \
   --profile example \
   --workspace-out artifacts/workspace.tar \
   --manifest-out artifacts/manifest.json
@@ -118,7 +118,7 @@ uv run agent-sandbox omp "Summarize the current workspace." \
 To continue the session, supply both saved files:
 
 ```bash
-uv run agent-sandbox omp "Continue the workspace." \
+uv run agent-sandbox pi "Continue the workspace." \
   --profile example \
   --workspace-in artifacts/workspace.tar \
   --manifest-in artifacts/manifest.json \
@@ -126,21 +126,36 @@ uv run agent-sandbox omp "Continue the workspace." \
   --manifest-out artifacts/next-manifest.json
 ```
 
-Use `--model`, `--thinking`, `--append-system`, and `--lean` for per-run options. See `uv run agent-sandbox omp --help` for all flags. The command prints status, summary, and output events. Exit codes are `0` for completion, `1` for a non-completed result after saving outputs, and `2` for invalid inputs or sandbox errors.
+Use `--model` (a gateway id such as `anthropic/claude-haiku-5-5`), `--thinking`, `--append-system`, and `--lean` for per-run options. See `uv run agent-sandbox pi --help` for all flags. The command prints status, summary, and output events. Exit codes are `0` for completion, `1` for a non-completed result after saving outputs, and `2` for invalid inputs or sandbox errors.
+
+### Interactive Pi over RPC
+
+`pi-rpc` runs `pi --mode rpc` in a container and behaves like a local Pi RPC child: the caller's stdin, stdout, and stderr pass through, stdin EOF ends Pi, and `SIGTERM` or `SIGINT` stops the container. pi-host's `sandboxed` profile spawns it in place of Pi.
+
+```bash
+PI_GATEWAY_TOKEN="$(cat ~/.local/state/gigachad-bot/pi-gateway.token)" \
+uv run agent-sandbox pi-rpc --profile example --cwd "$PWD" --session-dir /path/to/sessions --gateway-port 8300 \
+  -- --mode rpc --session-dir /path/to/sessions
+```
+
+- The container is `agent-sandbox-pi-<uuid>` with the hardened flags above. `--cwd` and `--session-dir` are bind-mounted read-write at their host paths, so edits and session files land on the host. Profile mounts outside the profile `workdir` are bound as declared; mounts inside it are skipped.
+- Pi runs from a private, writable copy of the gateway agent dir, with the host's installed packages bound read-only. The copy is removed when the container exits.
+- Pi selects its model over RPC, for example `{"type": "set_model", "provider": "gateway", "modelId": "anthropic/claude-haiku-5-5"}`.
+- The exit code is the container's. A missing token, working directory, session directory, or Docker CLI prints one error line and exits `2`. If Docker exits abnormally, the container is force-removed. Runs are neither serialized nor output-capped.
 
 ### Python API
 
 The library is the primary integration for applications that manage their own requests and storage.
 
 ```python
-from agent_sandbox import OmpTask, Sandbox, SandboxInvocation
+from agent_sandbox import PiTask, Sandbox, SandboxInvocation
 
 sandbox = Sandbox(namespace="tenant-a")
 invocation = SandboxInvocation(
     slot_key="workspace-42",
     profile_name="example",
     run_id="request-001",
-    task=OmpTask("Summarize the current workspace.", lean=True),
+    task=PiTask("Summarize the current workspace.", lean=True),
 )
 
 with sandbox.run(invocation) as result:
@@ -159,7 +174,7 @@ The caller owns storage. Save the archive at `result.workspace.path` with its `s
 - **Resume the session:** also pass the previous manifest as `active_manifest`. Its archive digest, profile, and image must match.
 - **Read an artifact:** `result.read_workspace_file()` safely reads a bounded regular file from the captured workspace while the result is retained.
 - **Release:** exiting the context manager, or calling `result.release()`, removes the temporary capture and cached result. `slot_key` and `run_id` provide in-process idempotency within one `Sandbox` instance.
-- **Task options:** `OmpTask` accepts `prompt_images` (a tuple of `PromptImage`), `model`, `thinking`, `append_system`, `lean`, and `timeout_s` (seconds, 1 to 86400, default 300).
+- **Task options:** `PiTask` accepts `prompt_images` (a tuple of `PromptImage`), `model` (a gateway id `<provider>/<id>`), `thinking`, `append_system`, `lean`, and `timeout_s` (seconds, 1 to 86400, default 300).
 - **Errors:** sandbox failures derive from `AgentSandboxError`. Invalid invocation inputs raise `ValueError` or `TypeError`.
 
 </details>
@@ -205,9 +220,9 @@ extract_archive(result.workspace.path, "/path/to/worktree", exclude=(".git", "AG
 
 | Boundary | Limit |
 | --- | --- |
-| OMP execution | 300 seconds by default; `OmpTask(timeout_s=...)` accepts 1 to 86400 |
+| Pi execution | 300 seconds by default; `PiTask(timeout_s=...)` accepts 1 to 86400 |
 | Prompt images | 32 MiB combined |
-| Retained stdout and stderr | 4 MiB combined; a larger output fails the run |
+| Pi stderr | 4 MiB; a larger output fails the run. Pi's JSON stdout streams through a parser that keeps only the final message, dropping any record over 4 MiB |
 | Workspace archive | 512 MiB |
 | `append_system` | 64 KiB |
 | `/runtime` and `/tmp` tmpfs | 1 GiB and 64 MiB respectively |
@@ -227,7 +242,7 @@ export FACTORY_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/factory
 uv run agent-sandbox factory serve [--config PATH]
 ```
 
-The engine listens on `127.0.0.1:8090` by default. Killing it mid-run is safe: on restart DBOS resumes every interrupted workflow from its last finished step, the interrupted agent turn re-runs with `--continue`, and a leftover host `omp` process from the crashed engine is killed first.
+The engine listens on `127.0.0.1:8090` by default. Killing it mid-run is safe: on restart DBOS resumes every interrupted workflow from its last finished step, the interrupted agent turn re-runs with `--continue`, and a leftover host `pi` process from the crashed engine is killed first.
 
 ### Engine config
 
@@ -243,7 +258,7 @@ preview_ports: [8100, 8199]
 limits:
   in_progress: 4                        # tasks working at once; read at startup, so changing it needs an engine restart
 otel_endpoint: null                     # OTLP traces endpoint for DBOS, optional
-omp_binary: omp                         # host omp for `sandbox: false` runs
+pi_binary: pi                           # host pi for `sandbox: false` runs
 ```
 
 ### Repos, defaults, and templates
@@ -254,14 +269,14 @@ The engine reads the layers below when a task starts and freezes the result into
 
 - Built-in defaults packaged in `agent_sandbox.factory`: settings (`merge: review`, `max_rounds: 3`, `sandbox: true`, `preview: true`, `models: {}`, `agent_timeout_s: 3600`, `command_timeout_s: 1800`), the agents `scout`, `planner`, `coder`, `reviewer` (the phases `scout`, `plan`, `code`, `review` use them in that order), and the workflows `code`, `scout-code`, `scout-plan-code`, `scout-plan-code-review`. The default sandbox profile is the bundled `factory-default`.
 - User defaults in `defaults_dir`, edited with `GET/PUT /v1/defaults` (`{"settings": {...}, "agents": {"<name>": "<markdown>"}}`): `defaults.yaml` overrides the settings, `agents/<name>.md` overrides a built-in agent. `PUT` validates every setting and agent (unknown agent names are rejected with 422) and writes atomically; an agent saved with its built-in text drops its override file.
-- Optional `factory.yaml` in the repo's main checkout, every field optional: `main_branch` (default: the branch checked out in the main checkout when the task starts; a detached HEAD is an error), `profile` (sandbox profile, default `factory-default`), `sandbox`, `hooks` (`after_create`, `after_code`, `before_remove`, each a list of argv lists), `gates` (argv lists run in order until one fails), `protected` globs (`factory.yaml`, `.factory/**`, `.omp/agents/**` are always protected), optional `preview:` block (`processes` with `name`, `argv`, `ready_url`, plus `env`, `database`, `url`, `api_url`, `ready_timeout_s`), and optional `merge`, `max_rounds`, `models`, `agent_timeout_s` (default 3600), `command_timeout_s` (default 1800). Unknown keys are rejected: the task queue concurrency is an engine setting (`limits.in_progress`), not a repo setting.
+- Optional `factory.yaml` in the repo's main checkout, every field optional: `main_branch` (default: the branch checked out in the main checkout when the task starts; a detached HEAD is an error), `profile` (sandbox profile, default `factory-default`), `sandbox`, `hooks` (`after_create`, `after_code`, `before_remove`, each a list of argv lists), `gates` (argv lists run in order until one fails), `protected` globs (`factory.yaml` and `.factory/**` are always protected), optional `preview:` block (`processes` with `name`, `argv`, `ready_url`, plus `env`, `database`, `url`, `api_url`, `ready_timeout_s`), and optional `merge`, `max_rounds`, `models`, `agent_timeout_s` (default 3600), `command_timeout_s` (default 1800). Unknown keys are rejected: the task queue concurrency is an engine setting (`limits.in_progress`), not a repo setting.
 - Placeholders: `{repo_path}` (the repo's main checkout) is expanded in `hooks`, `gates`, and every `preview` field when a task starts. Preview fields also expand `{port.<process name>}`, `{database_url}` (with `database: true`), `{data_dir}`, `{worktree}`, and `{task_id}` in process `argv` and `ready_url`, `env` values, `url`, and `api_url`. `api_url` (default: `url`) is the backend API base the engine passes to the coder-written preview scenario as `--api`.
 - `.factory/workflows/<id>.yaml` (the same id overrides a built-in workflow): `name`, `phases` (ordered subset of `scout, plan, code, review`, `code` required), `max_rounds`, `merge` (`auto` or `review`), `preview`, `sandbox`, `models`.
-- `.omp/agents/<name>.md` (overrides the user and built-in agent of the same name; names are fixed to `scout`, `planner`, `coder`, `reviewer`): YAML front matter (`name`, `description`, `model`, `thinking`, `writes` globs, `output`) and a markdown body sent as the system prompt. The coder may write `**` by default; every other agent is read-only and its changes are discarded.
+- `.factory/agents/<name>.md` (overrides the user and built-in agent of the same name; names are fixed to `scout`, `planner`, `coder`, `reviewer`): YAML front matter (`name`, `description`, `model`, `thinking`, `writes` globs, `output`) and a markdown body sent as the system prompt. The coder may write `**` by default; every other agent is read-only and its changes are discarded.
 
-Settings merge as built-in defaults, then user defaults, then `factory.yaml`, then the workflow, then the request `overrides`, and are validated afterwards. Agents resolve as repo `.omp/agents/<name>.md`, then user default, then built-in. Requests can only override `merge`, `max_rounds`, `preview`, `sandbox`, and `models`.
+Settings merge as built-in defaults, then user defaults, then `factory.yaml`, then the workflow, then the request `overrides`, and are validated afterwards. Agents resolve as repo `.factory/agents/<name>.md`, then user default, then built-in. Requests can only override `merge`, `max_rounds`, `preview`, `sandbox`, and `models`.
 
-Agents report through a JSON envelope in `.factory/out/<phase>.json` (the engine tells each agent the exact shape). A missing or malformed envelope gets one correction turn with `--continue`, then the task blocks. Writes outside an agent's allowlist or to protected paths are reverted, the agent is told, and the attempt costs a round. `.factory/out/` is engine-owned: it is never committed and never counts as a breach, and sandboxed turns exchange everything in it with the worktree except the JSON envelopes (those are read from the sandbox capture).
+Agents report through a JSON envelope in `.factory/out/<phase>.json` (the engine tells each agent the exact shape). A missing or malformed envelope gets one correction turn with `--continue`, then the task blocks. Writes outside an agent's allowlist or to protected paths are reverted, the agent is told, and the attempt costs a round. `.factory/out/` is engine-owned: it is never committed and never counts as a breach, and sandboxed turns exchange everything in it with the worktree except the JSON envelopes (those are read from the sandbox capture). The Pi session folder `.pi-session/` is engine-owned too: sandboxed turns keep it out of the worktree, save it per phase under `state_dir` from each capture, and restore it into the next turn's archive so `--continue` resumes the phase's session. Host turns (`sandbox: false`) keep their session under `state_dir` directly.
 
 ### Pipeline and states
 

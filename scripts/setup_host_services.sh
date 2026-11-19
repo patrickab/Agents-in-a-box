@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Let sandbox containers reach selected loopback-only host services (default: Ollama on 11434).
+# Let sandbox containers reach selected loopback-only host services (default: pi-host's model gateway on 8300 and 8301).
 #
 # Rootless Docker runs slirp4netns with --disable-host-loopback, so containers cannot reach
 # 127.0.0.1. Enabling host loopback would expose every local daemon (databases, app servers)
 # to the agent. Instead this adds a dedicated lo alias and proxies only the listed ports from
 # it to 127.0.0.1, so the services themselves stay loopback-bound.
 #
-# Idempotent. Uses sudo once for the persistent alias unit. Usage:
-#   ./scripts/setup_host_services.sh                   # proxy port 11434
-#   HOST_SERVICE_PORTS="11434 8080" ./scripts/setup_host_services.sh
+# Idempotent. Uses sudo once for the persistent alias unit. Proxies of ports no longer listed are removed. Usage:
+#   ./scripts/setup_host_services.sh                   # proxy ports 8300 (development) and 8301 (production)
+#   HOST_SERVICE_PORTS="8300 8301 8080" ./scripts/setup_host_services.sh
 
 set -euo pipefail
 
 # Must match HOST_SERVICE_ADDRESS in src/agent_sandbox/config.py.
 HOST_SERVICE_ADDRESS="10.200.200.1"
-# Must cover every port under the profile's host_services.
-HOST_SERVICE_PORTS="${HOST_SERVICE_PORTS:-11434}"
+# Must cover every port under the profile's host_services (PI_GATEWAY_URL resolves PI_GATEWAY_PORT, default 8300).
+HOST_SERVICE_PORTS="${HOST_SERVICE_PORTS:-8300 8301}"
 ALIAS_UNIT=/etc/systemd/system/agent-sandbox-host-alias.service
 USER_UNIT_DIR="$HOME/.config/systemd/user"
 
@@ -33,7 +33,7 @@ proxyd="$(ls /usr/lib/systemd/systemd-socket-proxyd /lib/systemd/systemd-socket-
 # A wildcard listener owns the port on every address, so the bridge cannot bind ${HOST_SERVICE_ADDRESS}:port.
 for port in $HOST_SERVICE_PORTS; do
     if ss -Hltn "sport = :$port" | grep -qE "(0\.0\.0\.0|\*|\[::\]):$port\b"; then
-        fail "Port $port is bound to all interfaces (e.g. OLLAMA_HOST=0.0.0.0). Bind that service to 127.0.0.1 and rerun."
+        fail "Port $port is bound to all interfaces. Bind that service to 127.0.0.1 and rerun."
     fi
 done
 
@@ -78,6 +78,16 @@ Description=agent-sandbox bridge for host port $port
 [Service]
 ExecStart=$proxyd 127.0.0.1:$port
 EOF
+done
+for socket_unit in "$USER_UNIT_DIR"/agent-sandbox-host-*.socket; do
+    [[ -e "$socket_unit" ]] || continue
+    port="${socket_unit##*/agent-sandbox-host-}"
+    port="${port%.socket}"
+    [[ " $HOST_SERVICE_PORTS " == *" $port "* ]] && continue
+    printf 'Removing the proxy for unlisted port %s...\n' "$port"
+    systemctl --user disable --now "agent-sandbox-host-$port.socket" || true
+    systemctl --user stop "agent-sandbox-host-$port.service" || true
+    rm -f "$socket_unit" "$USER_UNIT_DIR/agent-sandbox-host-$port.service"
 done
 systemctl --user daemon-reload
 for port in $HOST_SERVICE_PORTS; do

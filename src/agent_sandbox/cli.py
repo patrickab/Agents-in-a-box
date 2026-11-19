@@ -18,6 +18,7 @@ from agent_sandbox import (
 )
 from agent_sandbox.doctor import run_doctor
 from agent_sandbox.pi import serialize_events
+from agent_sandbox.pi_rpc import run_pi_rpc
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -39,8 +40,8 @@ def _require_output_parent(path: str) -> None:
         raise ValueError(f"output parent directory does not exist: {parent}")
 
 
-def _cmd_omp(args: argparse.Namespace) -> int:
-    """Run OMP through the sandbox and persist its workspace, manifest, and events."""
+def _cmd_pi(args: argparse.Namespace) -> int:
+    """Run Pi through the sandbox and persist its workspace, manifest, and events."""
     _require_output_parent(args.workspace_out)
     _require_output_parent(args.manifest_out)
     active_manifest = None
@@ -66,6 +67,12 @@ def _cmd_omp(args: argparse.Namespace) -> int:
     return 0 if result.status == "completed" else 1
 
 
+def _cmd_pi_rpc(args: argparse.Namespace) -> int:
+    """Run `pi --mode rpc` in a container with the caller's stdio."""
+    pi_args = args.pi_args[1:] if args.pi_args[:1] == ["--"] else args.pi_args
+    return run_pi_rpc(args.profile, args.cwd, args.session_dir, args.gateway_port, pi_args)
+
+
 def _cmd_factory_serve(args: argparse.Namespace) -> int:
     """Run the agent factory engine."""
     try:
@@ -84,20 +91,30 @@ def main(argv: list[str] | None = None) -> None:
     doctor_parser.add_argument("--profile", required=True, help="Profile name to verify.")
     doctor_parser.set_defaults(func=_cmd_doctor)
 
-    omp_parser = subparsers.add_parser("omp", help="Run OMP through a profiled sandbox.")
-    omp_parser.add_argument("prompt")
-    omp_parser.add_argument("--profile", required=True)
-    omp_parser.add_argument("--workspace-out", required=True)
-    omp_parser.add_argument("--manifest-out", required=True)
-    omp_parser.add_argument("--workspace-in")
-    omp_parser.add_argument("--manifest-in")
-    omp_parser.add_argument("--slot-key", default="cli")
-    omp_parser.add_argument("--run-id", default=str(uuid.uuid4()))
-    omp_parser.add_argument("--model")
-    omp_parser.add_argument("--thinking")
-    omp_parser.add_argument("--append-system")
-    omp_parser.add_argument("--lean", action="store_true")
-    omp_parser.set_defaults(func=_cmd_omp)
+    pi_parser = subparsers.add_parser("pi", help="Run Pi through a profiled sandbox.")
+    pi_parser.add_argument("prompt")
+    pi_parser.add_argument("--profile", required=True)
+    pi_parser.add_argument("--workspace-out", required=True)
+    pi_parser.add_argument("--manifest-out", required=True)
+    pi_parser.add_argument("--workspace-in")
+    pi_parser.add_argument("--manifest-in")
+    pi_parser.add_argument("--slot-key", default="cli")
+    pi_parser.add_argument("--run-id", default=str(uuid.uuid4()))
+    pi_parser.add_argument("--model")
+    pi_parser.add_argument("--thinking")
+    pi_parser.add_argument("--append-system")
+    pi_parser.add_argument("--lean", action="store_true")
+    pi_parser.set_defaults(func=_cmd_pi)
+
+    rpc_parser = subparsers.add_parser(
+        "pi-rpc", help="Run `pi --mode rpc` in a container with the caller's stdio (pi-host's sandboxed profile)."
+    )
+    rpc_parser.add_argument("--profile", required=True)
+    rpc_parser.add_argument("--cwd", required=True, help="Working directory, bind-mounted at its host path.")
+    rpc_parser.add_argument("--session-dir", required=True, help="Pi session directory, bind-mounted at its host path.")
+    rpc_parser.add_argument("--gateway-port", required=True, type=int, help="Host port of pi-host's model gateway.")
+    rpc_parser.add_argument("pi_args", nargs=argparse.REMAINDER, help="Pi arguments after `--`.")
+    rpc_parser.set_defaults(func=_cmd_pi_rpc)
 
     factory_parser = subparsers.add_parser("factory", help="Run the agent factory engine.")
     factory_subparsers = factory_parser.add_subparsers(dest="factory_command", required=True)

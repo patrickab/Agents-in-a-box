@@ -1,4 +1,4 @@
-"""Test CLI presentation, invocation construction, and durable OMP output."""
+"""Test CLI presentation, invocation construction, durable Pi output, and pi-rpc argument parsing."""
 
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from agent_sandbox import PiTask, SandboxRun, WorkspaceArchive
 from agent_sandbox.cli import main
 from agent_sandbox.doctor import CheckResult
+from agent_sandbox.errors import ContainerRuntimeError
 from agent_sandbox.manifest import Execution, Outputs, PiSessionState, SandboxManifest, WorkspaceRef, manifest_to_dict
 from agent_sandbox.pi import ErrorEvent, StreamEvent
 
@@ -65,19 +66,19 @@ class TestDoctorCommand(unittest.TestCase):
 
     @patch("agent_sandbox.cli.run_doctor")
     def test_exits_one_and_reports_failed_checks(self, run_doctor: MagicMock) -> None:
-        run_doctor.return_value = [CheckResult("docker-environment", True, "ready"), CheckResult("omp-binary", False, "missing")]
+        run_doctor.return_value = [CheckResult("docker-environment", True, "ready"), CheckResult("pi-binary", False, "missing")]
 
         stdout, stderr = io.StringIO(), io.StringIO()
         with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout), redirect_stderr(stderr):
             main(["doctor", "--profile", "gigachad"])
 
         self.assertEqual(raised.exception.code, 1)
-        self.assertEqual(stdout.getvalue(), "[OK  ] docker-environment: ready\n[FAIL] omp-binary: missing\n")
+        self.assertEqual(stdout.getvalue(), "[OK  ] docker-environment: ready\n[FAIL] pi-binary: missing\n")
         self.assertEqual(stderr.getvalue(), "\n1 check(s) failed.\n")
 
 
 @patch("agent_sandbox.cli.Sandbox")
-class TestOmpCommand(unittest.TestCase):
+class TestPiCommand(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -89,7 +90,7 @@ class TestOmpCommand(unittest.TestCase):
     def _main(self, *args: str) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
         argv = [
-            "omp",
+            "pi",
             *args,
             "--profile",
             "gigachad",
@@ -193,6 +194,29 @@ class TestOmpCommand(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("write failed", stderr)
         self.release.assert_called_once_with()
+
+
+@patch("agent_sandbox.cli.run_pi_rpc", return_value=7)
+class TestPiRpcCommand(unittest.TestCase):
+    def test_passes_pi_args_after_the_separator_and_exits_with_their_code(self, run_pi_rpc: MagicMock) -> None:
+        argv = ["pi-rpc", "--profile", "gigachad", "--cwd", "/w", "--session-dir", "/s", "--gateway-port", "8300", "--"]
+        pi_args = ["--mode", "rpc", "--session", "/s/a.jsonl", "--", "--not-an-option", "--session-dir", "/s"]
+
+        with self.assertRaises(SystemExit) as raised:
+            main([*argv, *pi_args])
+
+        self.assertEqual(raised.exception.code, 7)
+        run_pi_rpc.assert_called_once_with("gigachad", "/w", "/s", 8300, pi_args)
+
+    def test_startup_failure_prints_one_line_and_exits_two(self, run_pi_rpc: MagicMock) -> None:
+        run_pi_rpc.side_effect = ContainerRuntimeError("PI_GATEWAY_TOKEN is not set")
+        stderr = io.StringIO()
+
+        with self.assertRaises(SystemExit) as raised, redirect_stderr(stderr):
+            main(["pi-rpc", "--profile", "p", "--cwd", "/w", "--session-dir", "/s", "--gateway-port", "1", "--", "--mode", "rpc"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "agent-sandbox pi-rpc: error: PI_GATEWAY_TOKEN is not set\n")
 
 
 if __name__ == "__main__":
