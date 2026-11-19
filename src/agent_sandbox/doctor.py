@@ -99,12 +99,12 @@ def _check_runsc_startup(runtime: SandboxRuntime) -> CheckResult:
     return CheckResult("runsc-rootless-cgroups", True, "rootless runsc container started")
 
 
-def _check_omp(runtime: SandboxRuntime, profile: Profile) -> CheckResult:
+def _check_pi(runtime: SandboxRuntime, profile: Profile) -> CheckResult:
     try:
-        output = runtime.run_probe([profile.omp_binary, "--version"])
+        output = runtime.run_probe([profile.pi_binary, "--version"])
     except _PROBE_ERRORS as e:
-        return CheckResult("omp-binary", False, f"profile field 'omp_binary' ({profile.omp_binary}) failed to start: {e}")
-    return CheckResult("omp-binary", True, f"omp reports: {output.strip()}")
+        return CheckResult("pi-binary", False, f"profile field 'pi_binary' ({profile.pi_binary}) failed to start: {e}")
+    return CheckResult("pi-binary", True, f"pi reports: {output.strip()}")
 
 
 def _check_python(runtime: SandboxRuntime, profile: Profile) -> list[CheckResult]:
@@ -165,7 +165,7 @@ def run_doctor(profile_name: str) -> list[CheckResult]:
         lambda: _check_mounts_exist(profile),
         lambda: [_check_runsc_startup(runtime)],
         lambda: [
-            _check_omp(runtime, profile),
+            _check_pi(runtime, profile),
             *_check_python(runtime, profile),
             _check_agents_md(runtime, profile),
             *_check_host_services(runtime, profile),

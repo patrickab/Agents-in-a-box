@@ -16,7 +16,7 @@ from agent_sandbox.factory.engine import Engine
 from agent_sandbox.factory.models import Envelope, EnvelopeError, GateResult, ReviewEnvelope, envelope_summary
 from agent_sandbox.factory.prompts import CodeMode
 from agent_sandbox.factory.runners import AgentRunError, AgentTurn, Runner, run_agent_turn
-from agent_sandbox.omp import PromptImage
+from agent_sandbox.pi import PromptImage
 
 LOGGER = logging.getLogger("agent_sandbox.factory")
 APP_NAME = "agent-sandbox-factory"

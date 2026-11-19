@@ -17,7 +17,7 @@ import uuid
 
 from agent_sandbox import (
     AgentSandboxError,
-    OmpTask,
+    PiTask,
     PromptImage,
     Sandbox,
     SandboxInvocation,
@@ -34,7 +34,7 @@ from agent_sandbox.factory.models import Envelope, EnvelopeError, parse_envelope
 from agent_sandbox.factory.processes import terminate_process_groups
 from agent_sandbox.factory.prompts import correction_prompt
 from agent_sandbox.manifest import WorkspaceRef
-from agent_sandbox.omp import build_omp_argv
+from agent_sandbox.pi import build_pi_argv
 
 OUTPUT_TAIL_CHARS = 8000
 ACTIVE_PROCESS_FILE = "active-process.json"
@@ -70,9 +70,9 @@ class AgentTurn:
     images: tuple[PromptImage, ...] = ()
     timeout_s: int = 3600
 
-    def omp_task(self) -> OmpTask:
+    def omp_task(self) -> PiTask:
         """Build the omp task this turn runs."""
-        return OmpTask(
+        return PiTask(
             self.prompt,
             prompt_images=self.images,
             model=self.model,
@@ -233,7 +233,7 @@ class LocalRunner(_HostCommands):
         for image in turn.images:
             (images_dir / image.filename).write_bytes(image.content)
         task = turn.omp_task()
-        argv = build_omp_argv(
+        argv = build_pi_argv(
             self.omp_binary,
             task,
             session_dir=str(session_dir),

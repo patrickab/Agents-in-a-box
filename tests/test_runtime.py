@@ -12,16 +12,20 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
+from agent_sandbox.agent_dir import AgentSeed
 from agent_sandbox.archive import WorkspaceArchive
 from agent_sandbox.config import RUNTIME_TMPFS_SIZE, TMP_TMPFS_SIZE, runtime_resource_names
 from agent_sandbox.errors import ArchiveError, ContainerRuntimeError, PythonScriptError
-from agent_sandbox.omp import OmpTask
+from agent_sandbox.pi import PiOutcome, PiTask
 from agent_sandbox.profile import Mount, Profile
-from agent_sandbox.runtime import INTERNAL_WORKDIR, SandboxRuntime, WorkspaceRestore
+from agent_sandbox.runtime import INTERNAL_WORKDIR, SandboxRuntime, WorkspaceRestore, hardened_docker_run_flags
 import docker
 
 _Plan = tuple[list[tuple[bytes | None, bytes | None]], int]
-_TASK = OmpTask("perform work")
+_TASK = PiTask("perform work")
+_FINAL_EVENT = (
+    b'{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"pi output"}],"stopReason":"stop"}}\n'
+)
 
 
 class _ExecApi:
@@ -31,11 +35,13 @@ class _ExecApi:
         self._plans = plans
         self._by_id: dict[str, _Plan] = {}
         self.commands: list[list[str]] = []
+        self.environments: list[object] = []
         self.streamed_chunks = 0
 
-    def exec_create(self, _container_id: str, command: list[str], **_kwargs: object) -> dict[str, str]:
+    def exec_create(self, _container_id: str, command: list[str], **kwargs: object) -> dict[str, str]:
         exec_id = f"exec-{len(self.commands)}"
         self.commands.append(command)
+        self.environments.append(kwargs.get("environment"))
         self._by_id[exec_id] = self._plans[len(self.commands) - 1]
         return {"Id": exec_id}
 
@@ -81,7 +87,8 @@ def _profile(**overrides: object) -> Profile:
         "image": "test:latest",
         "workdir": "/workspace",
         "mounts": (),
-        "omp_binary": "/usr/local/bin/omp",
+        "pi_binary": "/opt/pi/pi",
+        "host_services": {"PI_GATEWAY_URL": 8300},
     }
     return Profile(**(fields | overrides))
 
@@ -101,12 +108,12 @@ _CAPTURE_ARCHIVE = _tar_bytes(tarfile.TarInfo("result.txt"), b"workspace archive
 
 
 def _plans(
-    omp_chunks: list[tuple[bytes | None, bytes | None]] | None = None,
+    pi_chunks: list[tuple[bytes | None, bytes | None]] | None = None,
     capture_chunks: list[tuple[bytes | None, bytes | None]] | None = None,
 ) -> list[_Plan]:
     return [
-        ([], 0),  # prepare workspace, optional restore, and OMP home
-        (omp_chunks or [(b"omp output", b"")], 0),
+        ([], 0),  # prepare workspace, optional restore, and the Pi agent dir
+        (pi_chunks or [(_FINAL_EVENT[:30], b""), (_FINAL_EVENT[30:], b"")], 0),
         (capture_chunks or [(_CAPTURE_ARCHIVE, None)], 0),
     ]
 
@@ -150,9 +157,23 @@ def _patched_capture_path(test: unittest.TestCase) -> tuple[str, object]:
     return capture_path, patch("agent_sandbox.runtime.tempfile.mkstemp", return_value=(descriptor, capture_path))
 
 
-@patch("agent_sandbox.runtime.build_omp_argv", return_value=["omp", "perform work"])
+class _SeededTest(unittest.TestCase):
+    """Replace the gateway token and agent-dir seed with local fixtures."""
+
+    def setUp(self) -> None:
+        seed_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(seed_dir.cleanup)
+        self.seed = AgentSeed(Path(seed_dir.name), Path("/host/pi-agent/npm"))
+        self.mocks: dict[str, MagicMock] = {}
+        for target, value in (("read_gateway_token", "gateway-token"), ("build_agent_seed", self.seed)):
+            patcher = patch(f"agent_sandbox.runtime.{target}", return_value=value)
+            self.mocks[target] = patcher.start()
+            self.addCleanup(patcher.stop)
+
+
+@patch("agent_sandbox.runtime.build_pi_argv", return_value=["pi", "perform work"])
 @patch("agent_sandbox.runtime._runtime_lease", return_value=nullcontext())
-class TestManagedTransaction(unittest.TestCase):
+class TestManagedTransaction(_SeededTest):
     def test_fresh_container_is_hardened_captured_and_removed(self, _lease: MagicMock, _argv: MagicMock) -> None:
         container = _Container(_plans())
         runtime, client = _runtime(container)
@@ -169,16 +190,31 @@ class TestManagedTransaction(unittest.TestCase):
             kwargs["tmpfs"],
             {"/runtime": f"rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}", "/tmp": f"rw,nosuid,nodev,size={TMP_TMPFS_SIZE}"},
         )
-        self.assertEqual(kwargs["mounts"], [])
-        self.assertEqual(result.exec_result.stdout, "omp output")
+        self.assertEqual(
+            [(mount["Source"], mount["Target"], mount["ReadOnly"]) for mount in kwargs["mounts"]],
+            [(str(self.seed.directory), "/runtime/pi-agent-seed", True), ("/host/pi-agent/npm", "/runtime/pi-agent/npm", True)],
+        )
+        self.mocks["build_agent_seed"].assert_called_once_with(8300, token="gateway-token")
+        self.assertEqual((result.exit_code, result.outcome), (0, PiOutcome("pi output")))
         self.assertEqual(result.workspace.sha256, hashlib.sha256(_CAPTURE_ARCHIVE).hexdigest())
         self.assertEqual(result.runtime_fingerprint, _effective_fingerprint(runtime))
         self.assertEqual(Path(result.workspace.path).read_bytes(), _CAPTURE_ARCHIVE)
         self.assertEqual(oct(os.stat(result.workspace.path).st_mode & 0o777), "0o600")
         setup = container.api.commands[0]
         self.assertEqual(setup[:2], ["sh", "-c"])
-        self.assertIn("rm -rf /runtime/omp-home", setup[2])
+        self.assertIn("cp -R /runtime/pi-agent-seed/. /runtime/pi-agent/", setup[2])
         self.assertNotIn("tar --extract", setup[2])
+        environment = container.api.environments[1]
+        self.assertEqual(
+            {key: environment[key] for key in ("PI_CODING_AGENT_DIR", "PI_GATEWAY_TOKEN", "PI_OFFLINE", "HOME")},
+            {
+                "PI_CODING_AGENT_DIR": "/runtime/pi-agent",
+                "PI_GATEWAY_TOKEN": "gateway-token",
+                "PI_OFFLINE": "1",
+                "HOME": "/runtime/home",
+            },
+        )
+        self.assertNotIn("PI_GATEWAY_TOKEN", kwargs["environment"])
         container.start.assert_called_once_with()
         container.remove.assert_called_once_with(force=True)
 
@@ -204,8 +240,24 @@ class TestManagedTransaction(unittest.TestCase):
 
         container.remove.assert_called_once_with(force=True)
 
+    def test_profile_without_gateway_service_is_refused(self, _lease: MagicMock, _argv: MagicMock) -> None:
+        runtime, client = _runtime(_Container(_plans()), profile=_profile(host_services={}))
+
+        with self.assertRaisesRegex(ContainerRuntimeError, "declares no PI_GATEWAY_URL host service"):
+            runtime.execute(_TASK)
+        client.containers.create.assert_not_called()
+
+    def test_failed_pi_response_is_reported_on_exit_zero(self, _lease: MagicMock, _argv: MagicMock) -> None:
+        failed = b'{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"401"}}\n'
+        runtime, _client = _runtime(_Container(_plans(pi_chunks=[(failed, None)])))
+
+        result = runtime.execute(_TASK)
+        self.addCleanup(Path(result.workspace.path).unlink, missing_ok=True)
+
+        self.assertEqual((result.exit_code, result.outcome), (0, PiOutcome("", "401")))
+
     def test_output_limit_stops_streaming_and_removes_container(self, _lease: MagicMock, _argv: MagicMock) -> None:
-        container = _Container(_plans(omp_chunks=[(b"ab", None), (b"cd", None)]))
+        container = _Container(_plans(pi_chunks=[(None, b"ab"), (None, b"cd")]))
         runtime, _client = _runtime(container)
 
         with (
@@ -229,7 +281,7 @@ class TestManagedTransaction(unittest.TestCase):
         self.assertFalse(os.path.exists(capture_path))
 
     def test_cleanup_failure_keeps_both_errors_visible(self, _lease: MagicMock, _argv: MagicMock) -> None:
-        container = _Container(_plans(omp_chunks=[(b"ab", None), (b"cd", None)]))
+        container = _Container(_plans(pi_chunks=[(None, b"ab"), (None, b"cd")]))
         container.remove.side_effect = RuntimeError("remove denied")
         runtime, _client = _runtime(container)
 
@@ -250,7 +302,7 @@ class TestManagedTransaction(unittest.TestCase):
             runtime.execute(_TASK)
 
         self.assertFalse(os.path.exists(capture_path))
-        self.assertEqual(container.api.streamed_chunks, 3)
+        self.assertEqual(container.api.streamed_chunks, 4)  # Two Pi chunks, then capture stops at its second chunk.
         container.remove.assert_called_once_with(force=True)
 
     def test_capture_rejects_unrestorable_members_and_unlinks_it(self, _lease: MagicMock, _argv: MagicMock) -> None:
@@ -322,22 +374,40 @@ class TestManagedTransaction(unittest.TestCase):
 
 
 @patch("agent_sandbox.runtime._runtime_lease", return_value=nullcontext())
-class TestOmpTimeout(unittest.TestCase):
-    def test_omp_execution_uses_the_task_timeout(self, _lease: MagicMock) -> None:
+class TestPiTimeout(_SeededTest):
+    def test_pi_execution_uses_the_task_timeout(self, _lease: MagicMock) -> None:
         container = _Container(_plans())
         runtime, _client = _runtime(container)
 
-        with patch("agent_sandbox.runtime.build_omp_argv", return_value=["omp", "go"]):
-            result = runtime.execute(OmpTask("go", timeout_s=7))
+        with patch("agent_sandbox.runtime.build_pi_argv", return_value=["pi", "go"]):
+            result = runtime.execute(PiTask("go", timeout_s=7))
         self.addCleanup(Path(result.workspace.path).unlink, missing_ok=True)
         self.assertEqual(container.api.commands[1][:3], ["timeout", "--signal=KILL", "7s"])
 
         timed_out_runtime, _client = _runtime(_Container([([], 0), ([], 124)]))
         with (
-            patch("agent_sandbox.runtime.build_omp_argv", return_value=["omp", "go"]),
-            self.assertRaisesRegex(ContainerRuntimeError, "OMP execution exceeded 9s limit"),
+            patch("agent_sandbox.runtime.build_pi_argv", return_value=["pi", "go"]),
+            self.assertRaisesRegex(ContainerRuntimeError, "Pi execution exceeded 9s limit"),
         ):
-            timed_out_runtime.execute(OmpTask("go", timeout_s=9))
+            timed_out_runtime.execute(PiTask("go", timeout_s=9))
+
+
+class TestHardenedFlags(unittest.TestCase):
+    def test_cli_flags_mirror_the_sdk_hardening(self) -> None:
+        self.assertEqual(
+            hardened_docker_run_flags(network=True, runtime_tmpfs=True),
+            [
+                "--read-only",
+                f"--tmpfs=/tmp:rw,nosuid,nodev,size={TMP_TMPFS_SIZE}",
+                f"--tmpfs=/runtime:rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}",
+                "--runtime=runsc",
+                "--user=0:0",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--network=bridge",
+            ],
+        )
+        self.assertEqual(hardened_docker_run_flags(network=False)[-1], "--network=none")
 
 
 class TestProbe(unittest.TestCase):

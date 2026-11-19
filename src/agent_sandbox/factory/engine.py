@@ -39,7 +39,7 @@ from agent_sandbox.factory.models import (
 )
 from agent_sandbox.factory.runners import Runner, kill_task_processes, make_runner, release_sandbox
 from agent_sandbox.factory.store import Store
-from agent_sandbox.omp import PromptImage
+from agent_sandbox.pi import PromptImage
 
 LOGGER = logging.getLogger("agent_sandbox.factory")
 MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024

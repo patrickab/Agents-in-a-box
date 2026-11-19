@@ -8,38 +8,39 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
-from agent_sandbox import ArchiveError, OmpTask, PromptImage, Sandbox, SandboxInvocation, SandboxRun, WorkspaceArchive
+from agent_sandbox import ArchiveError, PiTask, PromptImage, Sandbox, SandboxInvocation, SandboxRun, WorkspaceArchive
 from agent_sandbox.invocation import _bounded_summary
-from agent_sandbox.manifest import Execution, OmpSessionState, Outputs, SandboxManifest, WorkspaceRef
-from agent_sandbox.omp import ErrorEvent, StreamEvent
+from agent_sandbox.manifest import Execution, Outputs, PiSessionState, SandboxManifest, WorkspaceRef
+from agent_sandbox.pi import ErrorEvent, PiOutcome, StreamEvent
 from agent_sandbox.profile import Profile
-from agent_sandbox.runtime import ExecResult, ManagedExecutionResult, WorkspaceRestore
+from agent_sandbox.runtime import ManagedExecutionResult, WorkspaceRestore
 
-_TASK = OmpTask("task")
+_TASK = PiTask("task")
 
 
 def _execution(
     exit_code: int = 0,
     stdout: str = "ok",
+    error: str | None = None,
     stderr: str = "",
     archive_path: str = "/tmp/archive.tar",
     sha256: str = "a" * 64,
     runtime_fingerprint: str = "sha256:effective",
 ) -> ManagedExecutionResult:
     return ManagedExecutionResult(
-        ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr), WorkspaceArchive(archive_path, sha256), runtime_fingerprint
+        exit_code, PiOutcome(stdout, error), stderr, WorkspaceArchive(archive_path, sha256), runtime_fingerprint
     )
 
 
 def _manifest(sha256: str = "b" * 64) -> SandboxManifest:
     return SandboxManifest(
-        schema_version=1,
+        schema_version=2,
         manifest_id="prior-manifest",
         profile="test-profile",
         runtime_fingerprint="sha256:" + "a" * 64,
         workspace=WorkspaceRef(snapshot_asset_id=None, sha256=sha256),
         outputs=Outputs(events_asset_id=None, artifacts=()),
-        omp_sessions={"main": OmpSessionState(session_id="main", state_asset_id=None)},
+        pi_sessions={"main": PiSessionState(session_id="main", state_asset_id=None)},
         execution=Execution(run_id="prior-run", status="completed", exit_code=0, created_at=""),
     )
 
@@ -55,7 +56,7 @@ def _temp_capture() -> str:
     return path
 
 
-@patch("agent_sandbox.invocation.load_profile", return_value=Profile("test-profile", "test-image", "/workspace", (), "/usr/bin/omp"))
+@patch("agent_sandbox.invocation.load_profile", return_value=Profile("test-profile", "test-image", "/workspace", (), "/opt/pi/pi"))
 @patch("agent_sandbox.invocation.SandboxRuntime")
 class TestSandboxRun(unittest.TestCase):
     def _runtime(self, runtime_class: MagicMock, **execution: object) -> MagicMock:
@@ -103,7 +104,16 @@ class TestSandboxRun(unittest.TestCase):
         self.assertEqual(manifest.runtime_fingerprint, "sha256:resolved-image")
         self.assertEqual(manifest.workspace, WorkspaceRef(snapshot_asset_id=None, sha256="deadbeef" * 8))
         self.assertEqual((manifest.execution.status, manifest.execution.exit_code), ("failed", 1))
-        self.assertEqual(dict(manifest.omp_sessions), {"main": OmpSessionState(session_id="main", state_asset_id=None)})
+        self.assertEqual(dict(manifest.pi_sessions), {"main": PiSessionState(session_id="main", state_asset_id=None)})
+
+    def test_failed_pi_response_on_exit_zero_fails_the_run(self, runtime_class: MagicMock, _load: MagicMock) -> None:
+        self._runtime(runtime_class, stdout="", error="401 unauthorized")
+
+        result = Sandbox().run(_invocation("pi-error"))
+
+        self.assertEqual((result.status, result.summary), ("failed", "[failed] 401 unauthorized"))
+        self.assertEqual(result.next_manifest.execution.status, "failed")
+        self.assertEqual(result.outputs, (ErrorEvent(ename="PiExecutionError", evalue="401 unauthorized"),))
 
     def test_workspace_changed_compares_against_the_restored_archive(self, runtime_class: MagicMock, _load: MagicMock) -> None:
         self._runtime(runtime_class, sha256="c" * 64)
@@ -122,7 +132,7 @@ class TestSandboxRun(unittest.TestCase):
             (
                 StreamEvent(name="stdout", text="normal output"),
                 StreamEvent(name="stderr", text="warning output"),
-                ErrorEvent(ename="OMPExecutionError", evalue="omp exited with code 7"),
+                ErrorEvent(ename="PiExecutionError", evalue="pi exited with code 7"),
             ),
         )
 
@@ -194,7 +204,7 @@ class TestSandboxRun(unittest.TestCase):
     def test_distinct_slots_do_not_share_the_logical_slot_lock(self, runtime_class: MagicMock, _load: MagicMock) -> None:
         first_entered, second_entered, release_first = threading.Event(), threading.Event(), threading.Event()
 
-        def execute_transaction(task: OmpTask, _restore: object) -> ManagedExecutionResult:
+        def execute_transaction(task: PiTask, _restore: object) -> ManagedExecutionResult:
             if task.prompt == "first":
                 first_entered.set()
                 if not release_first.wait(timeout=1):
@@ -213,8 +223,8 @@ class TestSandboxRun(unittest.TestCase):
             except BaseException as error:
                 errors.append(error)
 
-        first = threading.Thread(target=execute, args=(_invocation("first-run", "slot-one", task=OmpTask("first")),))
-        second = threading.Thread(target=execute, args=(_invocation("second-run", "slot-two", task=OmpTask("second")),))
+        first = threading.Thread(target=execute, args=(_invocation("first-run", "slot-one", task=PiTask("first")),))
+        second = threading.Thread(target=execute, args=(_invocation("second-run", "slot-two", task=PiTask("second")),))
         first.start()
         try:
             self.assertTrue(first_entered.wait(timeout=1))
@@ -255,21 +265,21 @@ class TestInvocationValidation(unittest.TestCase):
             {"prompt": "task", "timeout_s": 0},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises((TypeError, ValueError)):
-                OmpTask(**kwargs)
+                PiTask(**kwargs)
 
     def test_prompt_images_validate_safety_bytes_and_combined_size(self) -> None:
         with self.assertRaisesRegex(ValueError, "safe basename"):
             PromptImage("../photo.png", b"image-bytes")
         with self.assertRaisesRegex(TypeError, "content must be bytes"):
             PromptImage("photo.png", "image-bytes")  # type: ignore[arg-type]
-        with patch("agent_sandbox.omp.MAX_PROMPT_IMAGE_BYTES", 3), self.assertRaisesRegex(ValueError, "must not exceed"):
-            OmpTask("inspect this", prompt_images=(PromptImage("one.png", b"ab"), PromptImage("two.png", b"cd")))
+        with patch("agent_sandbox.pi.MAX_PROMPT_IMAGE_BYTES", 3), self.assertRaisesRegex(ValueError, "must not exceed"):
+            PiTask("inspect this", prompt_images=(PromptImage("one.png", b"ab"), PromptImage("two.png", b"cd")))
 
-    def test_summary_is_bounded_single_line_and_prefers_stdout(self) -> None:
-        summary = _bounded_summary(ExecResult(exit_code=0, stdout="one\ntwo " + "x" * 500, stderr="ignored"), "completed", limit=20)
+    def test_summary_is_bounded_single_line_and_prefers_final_text(self) -> None:
+        summary = _bounded_summary(_execution(stdout="one\ntwo " + "x" * 500, stderr="ignored"), "completed", limit=20)
 
         self.assertEqual(summary, "[completed] one two " + "x" * 11 + "…")
-        self.assertEqual(_bounded_summary(ExecResult(exit_code=1, stdout="", stderr="\nstderr\n"), "failed"), "[failed] stderr")
+        self.assertEqual(_bounded_summary(_execution(exit_code=1, stdout="", stderr="\nstderr\n"), "failed"), "[failed] stderr")
 
 
 class TestSandboxRunWorkspaceRead(unittest.TestCase):

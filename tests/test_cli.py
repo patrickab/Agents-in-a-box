@@ -10,22 +10,22 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from agent_sandbox import OmpTask, SandboxRun, WorkspaceArchive
+from agent_sandbox import PiTask, SandboxRun, WorkspaceArchive
 from agent_sandbox.cli import main
 from agent_sandbox.doctor import CheckResult
-from agent_sandbox.manifest import Execution, OmpSessionState, Outputs, SandboxManifest, WorkspaceRef, manifest_to_dict
-from agent_sandbox.omp import ErrorEvent, StreamEvent
+from agent_sandbox.manifest import Execution, Outputs, PiSessionState, SandboxManifest, WorkspaceRef, manifest_to_dict
+from agent_sandbox.pi import ErrorEvent, StreamEvent
 
 
 def _manifest(run_id: str = "next-run", sha256: str = "a" * 64) -> SandboxManifest:
     return SandboxManifest(
-        schema_version=1,
+        schema_version=2,
         manifest_id="next-manifest",
         profile="gigachad",
         runtime_fingerprint="sha256:" + "b" * 64,
         workspace=WorkspaceRef(snapshot_asset_id=None, sha256=sha256),
         outputs=Outputs(events_asset_id=None, artifacts=()),
-        omp_sessions={"main": OmpSessionState(session_id="main", state_asset_id=None)},
+        pi_sessions={"main": PiSessionState(session_id="main", state_asset_id=None)},
         execution=Execution(run_id=run_id, status="completed", exit_code=0, created_at="2026-01-01T00:00:00+00:00"),
     )
 
@@ -134,7 +134,7 @@ class TestOmpCommand(unittest.TestCase):
         self.assertEqual((invocation.slot_key, invocation.run_id), ("cli", "fresh-run"))
         self.assertEqual(invocation.workspace, WorkspaceArchive(str(workspace_in), workspace_sha))
         self.assertIsNone(invocation.active_manifest)
-        self.assertEqual(invocation.task, OmpTask("do work", model="model-x", thinking="high", append_system="be concise", lean=True))
+        self.assertEqual(invocation.task, PiTask("do work", model="model-x", thinking="high", append_system="be concise", lean=True))
         self.assertEqual(
             stdout,
             'status: completed\nsummary: [completed] concise summary\n[{"name":"stdout","text":"result\\n","type":"StreamEvent"}]\n',
@@ -157,7 +157,7 @@ class TestOmpCommand(unittest.TestCase):
         self.assertEqual(invocation.workspace.path, str(workspace_in))
 
     def test_failed_run_exits_one_after_persisting_outputs(self, sandbox: MagicMock) -> None:
-        outputs = (ErrorEvent(ename="OMPExecutionError", evalue="omp exited with code 1"),)
+        outputs = (ErrorEvent(ename="PiExecutionError", evalue="pi exited with code 1"),)
         sandbox.return_value.run.return_value = _run(self.root / "capture.tar", self.release, status="failed", outputs=outputs)
 
         code, _stdout, _stderr = self._main("do work")

@@ -9,7 +9,7 @@ import uuid
 
 from agent_sandbox import (
     AgentSandboxError,
-    OmpTask,
+    PiTask,
     Sandbox,
     SandboxInvocation,
     WorkspaceArchive,
@@ -17,7 +17,7 @@ from agent_sandbox import (
     manifest_to_dict,
 )
 from agent_sandbox.doctor import run_doctor
-from agent_sandbox.omp import serialize_events
+from agent_sandbox.pi import serialize_events
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -51,7 +51,7 @@ def _cmd_omp(args: argparse.Namespace) -> int:
         slot_key=args.slot_key,
         profile_name=args.profile,
         run_id=args.run_id,
-        task=OmpTask(args.prompt, model=args.model, thinking=args.thinking, append_system=args.append_system, lean=args.lean),
+        task=PiTask(args.prompt, model=args.model, thinking=args.thinking, append_system=args.append_system, lean=args.lean),
         active_manifest=active_manifest,
         workspace=WorkspaceArchive.from_file(args.workspace_in) if args.workspace_in else None,
     )

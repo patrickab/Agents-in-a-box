@@ -20,9 +20,11 @@ from agent_sandbox._validation import (
     require_sha256,
 )
 
+# Version 2 replaced OMP sessions with Pi sessions; version-1 manifests resume nothing and are rejected.
+MANIFEST_SCHEMA_VERSION = 2
 _EXECUTION_STATUSES = frozenset({"completed", "failed"})
 _MANIFEST_FIELDS = frozenset(
-    {"schema_version", "manifest_id", "profile", "runtime_fingerprint", "workspace", "outputs", "omp_sessions", "execution"}
+    {"schema_version", "manifest_id", "profile", "runtime_fingerprint", "workspace", "outputs", "pi_sessions", "execution"}
 )
 
 
@@ -78,8 +80,8 @@ class Outputs:
 
 
 @dataclasses.dataclass(frozen=True)
-class OmpSessionState:
-    """Reference the durable state of one OMP session."""
+class PiSessionState:
+    """Reference the durable state of one Pi session."""
 
     session_id: str
     state_asset_id: str | None
@@ -112,18 +114,18 @@ class Execution:
 class SandboxManifest:
     """Storage-neutral durable record for one sandbox execution."""
 
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     manifest_id: str
     profile: str
     runtime_fingerprint: str
     workspace: WorkspaceRef
     outputs: Outputs
-    omp_sessions: Mapping[str, OmpSessionState]
+    pi_sessions: Mapping[str, PiSessionState]
     execution: Execution
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != 1:
-            raise ValueError("schema_version must be 1")
+        if type(self.schema_version) is not int or self.schema_version != MANIFEST_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {MANIFEST_SCHEMA_VERSION}")
         require_nonempty_string("manifest_id", self.manifest_id)
         require_nonempty_string("profile", self.profile)
         require_nonempty_string("runtime_fingerprint", self.runtime_fingerprint)
@@ -131,15 +133,15 @@ class SandboxManifest:
             raise ValueError("workspace must be a WorkspaceRef")
         if not isinstance(self.outputs, Outputs):
             raise ValueError("outputs must be an Outputs")
-        if not isinstance(self.omp_sessions, Mapping):
-            raise ValueError("omp_sessions must be a mapping")
-        for session_name, session_state in self.omp_sessions.items():
-            require_nonempty_string("omp session name", session_name)
-            if not isinstance(session_state, OmpSessionState):
-                raise ValueError("omp_sessions values must be OmpSessionState values")
+        if not isinstance(self.pi_sessions, Mapping):
+            raise ValueError("pi_sessions must be a mapping")
+        for session_name, session_state in self.pi_sessions.items():
+            require_nonempty_string("pi session name", session_name)
+            if not isinstance(session_state, PiSessionState):
+                raise ValueError("pi_sessions values must be PiSessionState values")
         if not isinstance(self.execution, Execution):
             raise ValueError("execution must be an Execution")
-        object.__setattr__(self, "omp_sessions", MappingProxyType(dict(self.omp_sessions)))
+        object.__setattr__(self, "pi_sessions", MappingProxyType(dict(self.pi_sessions)))
 
     def with_workspace_asset_id(self, asset_id: str | None) -> "SandboxManifest":
         """Return this manifest bound to a durable workspace asset."""
@@ -164,9 +166,9 @@ def manifest_to_dict(manifest: SandboxManifest) -> dict[str, Any]:
             "events_asset_id": manifest.outputs.events_asset_id,
             "artifacts": [{"asset_id": artifact.asset_id, "mime_type": artifact.mime_type} for artifact in manifest.outputs.artifacts],
         },
-        "omp_sessions": {
+        "pi_sessions": {
             name: {"session_id": state.session_id, "state_asset_id": state.state_asset_id}
-            for name, state in manifest.omp_sessions.items()
+            for name, state in manifest.pi_sessions.items()
         },
         "execution": {
             "run_id": manifest.execution.run_id,
@@ -178,7 +180,7 @@ def manifest_to_dict(manifest: SandboxManifest) -> dict[str, Any]:
 
 
 def to_yaml(manifest: SandboxManifest) -> str:
-    """Encode a durable manifest with the version-1 YAML field layout."""
+    """Encode a durable manifest with the current YAML field layout."""
     return yaml.safe_dump(manifest_to_dict(manifest), sort_keys=False)
 
 
@@ -203,9 +205,9 @@ def _dict_to_outputs(value: object) -> Outputs:
     )
 
 
-def _dict_to_omp_session_state(value: object) -> OmpSessionState:
-    data = require_exact_fields(value, frozenset({"session_id", "state_asset_id"}), "omp session")
-    return OmpSessionState(session_id=data["session_id"], state_asset_id=data["state_asset_id"])
+def _dict_to_pi_session_state(value: object) -> PiSessionState:
+    data = require_exact_fields(value, frozenset({"session_id", "state_asset_id"}), "pi session")
+    return PiSessionState(session_id=data["session_id"], state_asset_id=data["state_asset_id"])
 
 
 def _dict_to_execution(value: object) -> Execution:
@@ -216,7 +218,7 @@ def _dict_to_execution(value: object) -> Execution:
 def manifest_from_dict(value: object) -> SandboxManifest:
     """Decode and strictly validate a storage-neutral manifest mapping."""
     root = require_exact_fields(value, _MANIFEST_FIELDS, "manifest root")
-    sessions_data = require_mapping(root["omp_sessions"], "omp_sessions")
+    sessions_data = require_mapping(root["pi_sessions"], "pi_sessions")
     return SandboxManifest(
         schema_version=root["schema_version"],
         manifest_id=root["manifest_id"],
@@ -224,13 +226,13 @@ def manifest_from_dict(value: object) -> SandboxManifest:
         runtime_fingerprint=root["runtime_fingerprint"],
         workspace=_dict_to_workspace_ref(root["workspace"]),
         outputs=_dict_to_outputs(root["outputs"]),
-        omp_sessions={name: _dict_to_omp_session_state(state) for name, state in sessions_data.items()},
+        pi_sessions={name: _dict_to_pi_session_state(state) for name, state in sessions_data.items()},
         execution=_dict_to_execution(root["execution"]),
     )
 
 
 def from_yaml(text: str) -> SandboxManifest:
-    """Decode and strictly validate a version-1 durable manifest."""
+    """Decode and strictly validate a current-version durable manifest."""
     if not isinstance(text, str):
         raise ValueError("Manifest YAML must be text")
     try:

@@ -31,7 +31,7 @@ def runtime_resource_names(namespace: str | None = None) -> RuntimeResourceNames
     return RuntimeResourceNames(prefix, f"/tmp/{prefix}.lock")
 
 
-DEFAULT_OMP_TIMEOUT_SECONDS = 300
+DEFAULT_PI_TIMEOUT_SECONDS = 300
 MIN_TIMEOUT_SECONDS = 1
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 MAX_APPEND_SYSTEM_BYTES = 64 * 1024
@@ -42,7 +42,7 @@ RUNTIME_TMPFS_SIZE = "1g"
 TMP_TMPFS_SIZE = "64m"
 
 # Bump this marker whenever static runtime behavior changes in a way that affects reuse.
-RUNTIME_POLICY_DESCRIPTOR = "agent-sandbox-runtime-policy-v5"
+RUNTIME_POLICY_DESCRIPTOR = "agent-sandbox-runtime-policy-v6"
 
 PROFILE_SEARCH_PATH = [p for p in os.environ.get("AGENT_SANDBOX_PROFILE_PATH", "").split(os.pathsep) if p] + [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")

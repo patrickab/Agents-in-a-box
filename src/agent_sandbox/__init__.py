@@ -11,7 +11,7 @@ from agent_sandbox.errors import (
 )
 from agent_sandbox.invocation import Sandbox, SandboxInvocation, SandboxRun
 from agent_sandbox.manifest import SandboxManifest, manifest_from_dict, manifest_to_dict
-from agent_sandbox.omp import ErrorEvent, OmpTask, OutputEvent, PromptImage, StreamEvent
+from agent_sandbox.pi import ErrorEvent, OutputEvent, PiTask, PromptImage, StreamEvent
 from agent_sandbox.profile import Profile, load_profile
 
 __all__ = [
@@ -19,8 +19,8 @@ __all__ = [
     "ArchiveError",
     "ContainerRuntimeError",
     "ErrorEvent",
-    "OmpTask",
     "OutputEvent",
+    "PiTask",
     "Profile",
     "ProfileError",
     "PromptImage",

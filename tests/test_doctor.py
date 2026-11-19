@@ -23,7 +23,7 @@ _STAGED_CHECKS = (
     ("_check_runsc_cgroup_handling", CheckResult("runsc-cgroup-handling", True, "disabled")),
     ("_check_mounts_exist", [CheckResult("mount-ok:/workspace", True, "ok")]),
     ("_check_runsc_startup", CheckResult("runsc-rootless-cgroups", True, "ready")),
-    ("_check_omp", CheckResult("omp-binary", True, "ready")),
+    ("_check_pi", CheckResult("pi-binary", True, "ready")),
     ("_check_python", [CheckResult("venv", True, "ready")]),
     ("_check_agents_md", CheckResult("agents-md-visible", True, "visible")),
     ("_check_host_services", [CheckResult("OLLAMA_HOST", True, "reachable")]),
@@ -67,7 +67,7 @@ class TestRunDoctor(unittest.TestCase):
             ("_check_runsc_cgroup_handling", 2),
             ("_check_mounts_exist", 3),
             ("_check_runsc_startup", 4),
-            ("_check_omp", 8),
+            ("_check_pi", 8),
         ):
             with self.subTest(failing=failing):
                 results, checks = self._run(failing)
@@ -174,7 +174,7 @@ class TestRunDoctor(unittest.TestCase):
         self.assertEqual(_check_environment(runtime), CheckResult("docker-environment", False, "Docker daemon is not rootless"))
 
     def test_host_services_probe_each_port_and_explain_failures(self) -> None:
-        profile = Profile("p", "img", "/workspace", (), "/omp", host_services={"A": 1, "B": 2})
+        profile = Profile("p", "img", "/workspace", (), "/opt/pi/pi", host_services={"A": 1, "B": 2})
         runtime = MagicMock()
         runtime.run_probe.side_effect = [None, ContainerRuntimeError("probe exited 1")]
 

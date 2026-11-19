@@ -1,4 +1,4 @@
-"""Run profiled OMP work in short-lived rootless Docker/gVisor containers.
+"""Run profiled Pi work in short-lived rootless Docker/gVisor containers.
 
 Every managed execution gets a fresh named container solely so a namespace can
 serialize and clean up a crashed predecessor. Workspace continuity is carried
@@ -16,10 +16,19 @@ from pathlib import PurePosixPath
 import shlex
 import tempfile
 import threading
+from typing import Any
 
 from docker.models.containers import Container
 from docker.types import Mount as DockerMount
 
+from agent_sandbox.agent_dir import (
+    GATEWAY_HOST_SERVICE,
+    GATEWAY_PROVIDER,
+    AgentSeed,
+    build_agent_seed,
+    gateway_environment,
+    read_gateway_token,
+)
 from agent_sandbox.archive import WorkspaceArchive, verify_archive
 from agent_sandbox.config import (
     DOCKER_HOST,
@@ -38,19 +47,19 @@ from agent_sandbox.errors import (
     PythonScriptError,
     SecurityEnvironmentError,
 )
-from agent_sandbox.omp import OmpTask, build_omp_argv
+from agent_sandbox.pi import PiEventStream, PiOutcome, PiTask, build_pi_argv
 from agent_sandbox.profile import Profile
 import docker
 
 INTERNAL_WORKDIR = "/runtime/active"
-_SESSION_DIR = f"{INTERNAL_WORKDIR}/.omp-session"
+_SESSION_DIR = f"{INTERNAL_WORKDIR}/.pi-session"
 _PROMPT_IMAGES_DIR = "/runtime/prompt-images"
 _APPEND_SYSTEM_DIR = "/runtime/append-system"
 _APPEND_SYSTEM_PATH = f"{_APPEND_SYSTEM_DIR}/APPEND_SYSTEM.md"
-_OMP_HOME = "/runtime/omp-home"
-# Host-only bulk omp never reads in a sandbox (session history, browser downloads, daemon sockets and browser
-# profile under run/, stats); copying it overflows the tmpfs.
-_OMP_HOME_SKIPPED = ("agent/sessions", "puppeteer", "run", "stats.db", "stats.db-shm", "stats.db-wal")
+_HOME = "/runtime/home"
+_AGENT_SEED_DIR = "/runtime/pi-agent-seed"
+# Pi writes to its agent dir, so the read-only seed is copied here; the host package tree binds read-only inside it.
+_AGENT_DIR = "/runtime/pi-agent"
 _RESTORE_ARCHIVE_PATH = "/runtime/restore-archive.tar"
 _TIMEOUT_EXIT_CODES = frozenset({124, 137})  # timeout(1) and SIGKILL.
 _runtime_thread_locks: dict[str, threading.Lock] = {}
@@ -66,7 +75,7 @@ class ExecResult:
 
 @dataclass(frozen=True)
 class WorkspaceRestore:
-    """Restore a pinned workspace archive, optionally continuing the OMP session inside it."""
+    """Restore a pinned workspace archive, optionally continuing the Pi session inside it."""
 
     archive: WorkspaceArchive
     prior_runtime_fingerprint: str | None = None  # Set when resuming; must equal this run's effective fingerprint.
@@ -78,9 +87,11 @@ class WorkspaceRestore:
 
 @dataclass(frozen=True)
 class ManagedExecutionResult:
-    """Return OMP output and the transient workspace capture from one transaction."""
+    """Return Pi's outcome and the transient workspace capture from one transaction."""
 
-    exec_result: ExecResult
+    exit_code: int
+    outcome: PiOutcome
+    stderr: str
     workspace: WorkspaceArchive
     runtime_fingerprint: str
 
@@ -102,34 +113,61 @@ def _bind(source: str, target: str, *, read_only: bool = True) -> DockerMount:
     return DockerMount(target=target, source=source, type="bind", read_only=read_only)
 
 
+def hardened_container_options(*, network: bool, runtime_tmpfs: bool = False) -> dict[str, Any]:
+    """Return the Docker SDK create options every sandbox container shares."""
+    tmpfs = {"/tmp": f"rw,nosuid,nodev,size={TMP_TMPFS_SIZE}"}
+    if runtime_tmpfs:
+        # Pi's native assets and its agent dir live here, so it must allow exec.
+        tmpfs["/runtime"] = f"rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}"
+    return {
+        "read_only": True,
+        "tmpfs": tmpfs,
+        "runtime": "runsc",
+        "user": "0:0",
+        "cap_drop": ["ALL"],
+        "security_opt": ["no-new-privileges"],
+        **({"network_mode": "bridge"} if network else {"network_disabled": True}),
+    }
+
+
+def hardened_docker_run_flags(*, network: bool, runtime_tmpfs: bool = False) -> list[str]:
+    """Render hardened_container_options as `docker run` flags for callers that exec the Docker CLI."""
+    options = hardened_container_options(network=network, runtime_tmpfs=runtime_tmpfs)
+    return [
+        "--read-only",
+        *(f"--tmpfs={path}:{mount_options}" for path, mount_options in options["tmpfs"].items()),
+        f"--runtime={options['runtime']}",
+        f"--user={options['user']}",
+        *(f"--cap-drop={capability}" for capability in options["cap_drop"]),
+        *(f"--security-opt={option}" for option in options["security_opt"]),
+        f"--network={options.get('network_mode', 'none')}",
+    ]
+
+
 def _stream_container_exec(
     container: Container,
     command: list[str],
     *,
     workdir: str | None = None,
     environment: dict[str, str] | None = None,
-    workspace_sink: Callable[[bytes], None] | None = None,
+    stdout_sink: Callable[[bytes], None] | None = None,
 ) -> ExecResult:
     """Run one exec with bounded output.
 
-    Retained stdout and stderr share one MAX_RETAINED_OUTPUT_BYTES budget. With a workspace
-    sink, stdout streams into it under MAX_WORKSPACE_ARCHIVE_BYTES and only stderr is retained.
+    Retained stdout and stderr share one MAX_RETAINED_OUTPUT_BYTES budget. With a stdout sink,
+    stdout streams into it unretained and the sink bounds what it keeps.
     """
     api = container.client.api
     exec_id = api.exec_create(container.id, command, stdout=True, stderr=True, environment=environment, workdir=workdir)["Id"]
     stdout, stderr = bytearray(), bytearray()
-    sunk = 0
     with closing(api.exec_start(exec_id, stream=True, demux=True)) as stream:
         for stdout_chunk, stderr_chunk in stream:
             if stderr_chunk:
                 stderr.extend(stderr_chunk)
-            if stdout_chunk and workspace_sink is None:
+            if stdout_chunk and stdout_sink is None:
                 stdout.extend(stdout_chunk)
             elif stdout_chunk:
-                sunk += len(stdout_chunk)
-                if sunk > MAX_WORKSPACE_ARCHIVE_BYTES:
-                    raise ArchiveError(f"captured workspace exceeds {MAX_WORKSPACE_ARCHIVE_BYTES} byte limit")
-                workspace_sink(stdout_chunk)
+                stdout_sink(stdout_chunk)
             if len(stdout) + len(stderr) > MAX_RETAINED_OUTPUT_BYTES:
                 raise ContainerRuntimeError(f"command output exceeds {MAX_RETAINED_OUTPUT_BYTES} byte limit")
     exit_code = api.exec_inspect(exec_id)["ExitCode"]
@@ -199,23 +237,13 @@ class SandboxRuntime:
         name: str | None = None,
     ) -> Iterator[Container]:
         """Create and start one hardened idle container, and always force-remove it."""
-        tmpfs = {"/tmp": f"rw,nosuid,nodev,size={TMP_TMPFS_SIZE}"}
-        if runtime_tmpfs:
-            # OMP extracts and dlopens its native addon under $HOME, which lives here.
-            tmpfs["/runtime"] = f"rw,exec,nosuid,nodev,size={RUNTIME_TMPFS_SIZE}"
         container = self.client.containers.create(
             image,
             command=["sleep", "infinity"],
             name=name,
-            read_only=True,
-            tmpfs=tmpfs,
             mounts=mounts,
             environment=environment or {},
-            runtime="runsc",
-            user="0:0",
-            cap_drop=["ALL"],
-            security_opt=["no-new-privileges"],
-            **({"network_mode": "bridge"} if network else {"network_disabled": True}),
+            **hardened_container_options(network=network, runtime_tmpfs=runtime_tmpfs),
         )
         try:
             container.start()
@@ -236,8 +264,11 @@ class SandboxRuntime:
             raise ContainerRuntimeError(f"probe exited {result.exit_code}: {(result.stdout + result.stderr).strip()}")
         return result.stdout
 
-    def execute(self, task: OmpTask, restore: WorkspaceRestore | None = None) -> ManagedExecutionResult:
-        """Run one OMP task in a fresh managed container under the namespace lease."""
+    def execute(self, task: PiTask, restore: WorkspaceRestore | None = None) -> ManagedExecutionResult:
+        """Run one Pi task in a fresh managed container under the namespace lease."""
+        gateway_port = self.profile.host_services.get(GATEWAY_HOST_SERVICE)
+        if gateway_port is None:
+            raise ContainerRuntimeError(f"profile '{self.profile.name}' declares no {GATEWAY_HOST_SERVICE} host service")
         with (
             _runtime_lease(self._resource_names.lock_path),
             tempfile.TemporaryDirectory(prefix="agent-sandbox-inputs-") as staging_dir,
@@ -245,46 +276,67 @@ class SandboxRuntime:
             image_id = self.verify_environment()
             self._remove_stale_container()
             fingerprint = self._effective_runtime_fingerprint(image_id)
-            mounts = [*self._managed_mounts(), *self._stage_task_inputs(task, staging_dir)]
             if restore is not None:
                 self._verify_restore(restore, fingerprint)
-                mounts.append(_bind(restore.archive.path, _RESTORE_ARCHIVE_PATH))
-            argv = build_omp_argv(
-                self.profile.omp_binary,
-                task,
-                session_dir=_SESSION_DIR,
-                resuming=restore is not None and restore.resuming,
-                images_dir=_PROMPT_IMAGES_DIR,
-                append_system_path=_APPEND_SYSTEM_PATH,
-            )
-            capture: WorkspaceArchive | None = None
-            try:
-                with self._fresh_container(
-                    image_id,
-                    label="managed",
-                    error=ContainerRuntimeError,
-                    network=True,
-                    mounts=mounts,
-                    runtime_tmpfs=True,
-                    environment=self._environment(),
-                    name=self._resource_names.container,
-                ) as container:
-                    self._prepare_container(container, restoring=restore is not None)
-                    exec_result = _stream_container_exec(
-                        container,
-                        ["timeout", "--signal=KILL", f"{task.timeout_s}s", *argv],
-                        workdir=INTERNAL_WORKDIR,
-                        environment=self._omp_environment(),
-                    )
-                    if exec_result.exit_code in _TIMEOUT_EXIT_CODES:
-                        raise ContainerRuntimeError(f"OMP execution exceeded {task.timeout_s}s limit")
-                    capture = self._capture_workspace(container)
-            except BaseException:
-                if capture is not None:  # Only container removal can fail after capture.
-                    with suppress(FileNotFoundError):
-                        os.unlink(capture.path)
-                raise
-            return ManagedExecutionResult(exec_result, capture, fingerprint)
+            token = read_gateway_token()
+            with build_agent_seed(gateway_port, token=token) as seed:
+                return self._execute_in_container(task, restore, staging_dir, seed, token, image_id, fingerprint)
+
+    def _execute_in_container(
+        self,
+        task: PiTask,
+        restore: WorkspaceRestore | None,
+        staging_dir: str,
+        seed: AgentSeed,
+        token: str,
+        image_id: str,
+        fingerprint: str,
+    ) -> ManagedExecutionResult:
+        """Run Pi in one fresh named container and capture its workspace."""
+        mounts = [*self._managed_mounts(), *self._stage_task_inputs(task, staging_dir), _bind(str(seed.directory), _AGENT_SEED_DIR)]
+        if seed.npm_dir is not None:
+            mounts.append(_bind(str(seed.npm_dir), f"{_AGENT_DIR}/npm"))
+        if restore is not None:
+            mounts.append(_bind(restore.archive.path, _RESTORE_ARCHIVE_PATH))
+        argv = build_pi_argv(
+            self.profile.pi_binary,
+            task,
+            session_dir=_SESSION_DIR,
+            resuming=restore is not None and restore.resuming,
+            images_dir=_PROMPT_IMAGES_DIR,
+            append_system_path=_APPEND_SYSTEM_PATH,
+            provider=GATEWAY_PROVIDER,
+        )
+        capture: WorkspaceArchive | None = None
+        try:
+            with self._fresh_container(
+                image_id,
+                label="managed",
+                error=ContainerRuntimeError,
+                network=True,
+                mounts=mounts,
+                runtime_tmpfs=True,
+                environment=self._environment(),
+                name=self._resource_names.container,
+            ) as container:
+                self._prepare_container(container, restoring=restore is not None)
+                events = PiEventStream()
+                exec_result = _stream_container_exec(
+                    container,
+                    ["timeout", "--signal=KILL", f"{task.timeout_s}s", *argv],
+                    workdir=INTERNAL_WORKDIR,
+                    environment=self._pi_environment(token),
+                    stdout_sink=events.feed,
+                )
+                if exec_result.exit_code in _TIMEOUT_EXIT_CODES:
+                    raise ContainerRuntimeError(f"Pi execution exceeded {task.timeout_s}s limit")
+                capture = self._capture_workspace(container)
+        except BaseException:
+            if capture is not None:  # Only container removal can fail after capture.
+                with suppress(FileNotFoundError):
+                    os.unlink(capture.path)
+            raise
+        return ManagedExecutionResult(exec_result.exit_code, events.finish(), exec_result.stderr, capture, fingerprint)
 
     def execute_python(self, interpreter: str, script: str, timeout: float) -> str:
         """Run a script in a fresh network-disabled container and return bounded stdout."""
@@ -361,7 +413,7 @@ class SandboxRuntime:
         return [_bind(mount.source, mount.target) for mount in self.profile.mounts if provides_interpreter(mount.target)]
 
     @staticmethod
-    def _stage_task_inputs(task: OmpTask, staging_dir: str) -> list[DockerMount]:
+    def _stage_task_inputs(task: PiTask, staging_dir: str) -> list[DockerMount]:
         """Write per-run inputs to host files and expose them as read-only bind mounts.
 
         Under gVisor the /runtime tmpfs lives in the sandbox kernel, invisible to Docker's
@@ -389,13 +441,14 @@ class SandboxRuntime:
         services = {name: f"http://{HOST_SERVICE_ADDRESS}:{port}" for name, port in self.profile.host_services.items()}
         return {**forwarded, **services}
 
-    def _omp_environment(self) -> dict[str, str]:
+    def _pi_environment(self, token: str) -> dict[str, str]:
+        """Give the Pi exec a writable home, the profile interpreters on PATH, and its gateway agent dir."""
         bin_dirs = [str(PurePosixPath(path).parent) for path in self.profile.python_interpreters.values()]
         path = ":".join([*dict.fromkeys(bin_dirs), "/usr/local/bin", "/usr/bin", "/bin"])
-        return {**self._environment(), "HOME": _OMP_HOME, "PATH": path}
+        return {**self._environment(), "HOME": _HOME, "PATH": path, **gateway_environment(_AGENT_DIR, token)}
 
     def _prepare_container(self, container: Container, *, restoring: bool) -> None:
-        """Create the workspace, extract any mounted restore archive, and prepare a writable home."""
+        """Create the workspace, extract any mounted restore archive, and copy the agent-dir seed into a writable home."""
         steps = [f"mkdir -p {INTERNAL_WORKDIR}"]
         if restoring:
             skipped = [
@@ -413,10 +466,8 @@ class SandboxRuntime:
                 *skipped,
             ]
             steps.append(" ".join(extract))
-        steps.append(f"rm -rf {_OMP_HOME} && mkdir -p {_OMP_HOME}/.omp")
-        omp_skipped = " ".join(f"--exclude=./{path}" for path in _OMP_HOME_SKIPPED)
-        seed = f"tar -C /root/.omp --anchored --no-wildcards {omp_skipped} -cf - . | tar -C {_OMP_HOME}/.omp -xf -"
-        steps.append(f"{{ [ ! -d /root/.omp ] || {{ {seed}; }}; }}")
+        steps.append(f"mkdir -p {_HOME} {_AGENT_DIR}")
+        steps.append(f"cp -R {_AGENT_SEED_DIR}/. {_AGENT_DIR}/")
         command = " && ".join(steps)
         result = _stream_container_exec(container, ["sh", "-c", command])
         if result.exit_code != 0:
@@ -431,7 +482,16 @@ class SandboxRuntime:
         descriptor, archive_path = tempfile.mkstemp(suffix=".tar", prefix="agent-sandbox-snapshot-")
         try:
             with os.fdopen(descriptor, "wb") as archive:
-                result = _stream_container_exec(container, command, workspace_sink=archive.write)
+                written = 0
+
+                def write_bounded(chunk: bytes) -> None:
+                    nonlocal written
+                    written += len(chunk)
+                    if written > MAX_WORKSPACE_ARCHIVE_BYTES:
+                        raise ArchiveError(f"captured workspace exceeds {MAX_WORKSPACE_ARCHIVE_BYTES} byte limit")
+                    archive.write(chunk)
+
+                result = _stream_container_exec(container, command, stdout_sink=write_bounded)
             if result.exit_code != 0:
                 raise ContainerRuntimeError(f"capture failed: tar exited {result.exit_code}: {result.stderr}")
             return WorkspaceArchive(archive_path, verify_archive(archive_path))

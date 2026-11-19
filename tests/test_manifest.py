@@ -7,8 +7,8 @@ import yaml
 from agent_sandbox.manifest import (
     Artifact,
     Execution,
-    OmpSessionState,
     Outputs,
+    PiSessionState,
     SandboxManifest,
     WorkspaceRef,
     from_yaml,
@@ -20,7 +20,7 @@ from agent_sandbox.manifest import (
 
 def _manifest_data() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "manifest_id": "manifest-asset-001",
         "profile": "gigachad",
         "runtime_fingerprint": "sha256:runtime",
@@ -29,7 +29,7 @@ def _manifest_data() -> dict:
             "events_asset_id": "events-asset-001",
             "artifacts": [{"asset_id": "artifact-asset-001", "mime_type": "text/plain"}],
         },
-        "omp_sessions": {"main": {"session_id": "omp-session-001", "state_asset_id": "omp-state-asset-001"}},
+        "pi_sessions": {"main": {"session_id": "pi-session-001", "state_asset_id": "pi-state-asset-001"}},
         "execution": {"run_id": "run-001", "status": "completed", "exit_code": 0, "created_at": "2026-09-19T12:00:00Z"},
     }
 
@@ -40,9 +40,9 @@ class TestManifestSerialization(unittest.TestCase):
     def _from_data(self, data: dict) -> SandboxManifest:
         return from_yaml(yaml.safe_dump(data, sort_keys=False))
 
-    def _manifest(self, sessions: dict[str, OmpSessionState] | None = None) -> SandboxManifest:
+    def _manifest(self, sessions: dict[str, PiSessionState] | None = None) -> SandboxManifest:
         return SandboxManifest(
-            schema_version=1,
+            schema_version=2,
             manifest_id="manifest-asset-001",
             profile="gigachad",
             runtime_fingerprint="sha256:runtime",
@@ -51,9 +51,9 @@ class TestManifestSerialization(unittest.TestCase):
                 events_asset_id="events-asset-001",
                 artifacts=(Artifact(asset_id="artifact-asset-001", mime_type="text/plain"),),
             ),
-            omp_sessions=sessions
+            pi_sessions=sessions
             if sessions is not None
-            else {"main": OmpSessionState(session_id="omp-session-001", state_asset_id="omp-state-asset-001")},
+            else {"main": PiSessionState(session_id="pi-session-001", state_asset_id="pi-state-asset-001")},
             execution=Execution(run_id="run-001", status="completed", exit_code=0, created_at="2026-09-19T12:00:00Z"),
         )
 
@@ -64,7 +64,7 @@ class TestManifestSerialization(unittest.TestCase):
 
         self.assertEqual(
             serialized,
-            """schema_version: 1
+            """schema_version: 2
 manifest_id: manifest-asset-001
 profile: gigachad
 runtime_fingerprint: sha256:runtime
@@ -76,10 +76,10 @@ outputs:
   artifacts:
   - asset_id: artifact-asset-001
     mime_type: text/plain
-omp_sessions:
+pi_sessions:
   main:
-    session_id: omp-session-001
-    state_asset_id: omp-state-asset-001
+    session_id: pi-session-001
+    state_asset_id: pi-state-asset-001
 execution:
   run_id: run-001
   status: completed
@@ -114,7 +114,7 @@ execution:
             (lambda data: data.pop("profile"), "root missing required field"),
             (lambda data: data["workspace"].update({"extra": True}), "workspace has unsupported field"),
             (lambda data: data["outputs"]["artifacts"][0].pop("mime_type"), "artifact missing required field"),
-            (lambda data: data["omp_sessions"]["main"].update({"extra": True}), "omp session has unsupported field"),
+            (lambda data: data["pi_sessions"]["main"].update({"extra": True}), "pi session has unsupported field"),
             (lambda data: data["execution"].update({"extra": True}), "execution has unsupported field"),
         )
         for mutate, error in cases:
@@ -128,7 +128,7 @@ execution:
         cases = (
             (lambda data: data.update({"workspace": []}), "workspace must be a mapping"),
             (lambda data: data["outputs"].update({"artifacts": {}}), "outputs.artifacts must be a list"),
-            (lambda data: data.update({"omp_sessions": []}), "omp_sessions must be a mapping"),
+            (lambda data: data.update({"pi_sessions": []}), "pi_sessions must be a mapping"),
             (lambda data: data.update({"execution": []}), "execution must be a mapping"),
         )
         for mutate, error in cases:
@@ -140,8 +140,8 @@ execution:
 
     def test_schema_requires_version_one_and_lowercase_workspace_hashes(self) -> None:
         cases = (
-            (lambda data: data.update({"schema_version": 2}), "schema_version must be 1"),
-            (lambda data: data.update({"schema_version": True}), "schema_version must be 1"),
+            (lambda data: data.update({"schema_version": 1}), "schema_version must be 2"),
+            (lambda data: data.update({"schema_version": True}), "schema_version must be 2"),
             (lambda data: data["workspace"].update({"sha256": "A" * 64}), "64-character lowercase"),
             (lambda data: data["workspace"].update({"sha256": "a" * 63}), "64-character lowercase"),
         )
@@ -202,17 +202,17 @@ execution:
         with self.assertRaisesRegex(ValueError, "durable asset ID"):
             Artifact(asset_id="../artifact", mime_type="text/plain")
         with self.assertRaisesRegex(ValueError, "durable asset ID"):
-            OmpSessionState(session_id="main", state_asset_id="assets/../state")
+            PiSessionState(session_id="main", state_asset_id="assets/../state")
 
     def test_session_mapping_is_copied_and_immutable(self) -> None:
-        sessions = {"main": OmpSessionState(session_id="omp-session-001", state_asset_id=None)}
+        sessions = {"main": PiSessionState(session_id="pi-session-001", state_asset_id=None)}
         manifest = self._manifest(sessions)
 
-        sessions["later"] = OmpSessionState(session_id="omp-session-002", state_asset_id=None)
+        sessions["later"] = PiSessionState(session_id="pi-session-002", state_asset_id=None)
 
-        self.assertEqual(tuple(manifest.omp_sessions), ("main",))
+        self.assertEqual(tuple(manifest.pi_sessions), ("main",))
         with self.assertRaises(TypeError):
-            manifest.omp_sessions["new"] = OmpSessionState(session_id="omp-session-003", state_asset_id=None)  # type: ignore[index]
+            manifest.pi_sessions["new"] = PiSessionState(session_id="pi-session-003", state_asset_id=None)  # type: ignore[index]
 
     def test_workspace_asset_binding_returns_a_new_manifest(self) -> None:
         manifest = self._manifest()
@@ -224,7 +224,7 @@ execution:
         self.assertEqual(bound.profile, manifest.profile)
         self.assertEqual(bound.runtime_fingerprint, manifest.runtime_fingerprint)
         self.assertEqual(bound.outputs, manifest.outputs)
-        self.assertEqual(bound.omp_sessions, manifest.omp_sessions)
+        self.assertEqual(bound.pi_sessions, manifest.pi_sessions)
         self.assertEqual(bound.execution, manifest.execution)
         self.assertEqual(bound.manifest_id, manifest.manifest_id)
         self.assertEqual(manifest.workspace.snapshot_asset_id, "workspace-asset-001")
@@ -233,14 +233,14 @@ execution:
 
     def test_duplicate_yaml_keys_are_rejected(self) -> None:
         text = """
-schema_version: 1
-schema_version: 1
+schema_version: 2
+schema_version: 2
 manifest_id: manifest-asset-001
 profile: gigachad
 runtime_fingerprint: sha256:runtime
 workspace: {snapshot_asset_id: workspace-asset-001, sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 outputs: {events_asset_id: null, artifacts: []}
-omp_sessions: {}
+pi_sessions: {}
 execution: {run_id: run-001, status: completed, exit_code: 0, created_at: '2026-09-19T12:00:00Z'}
 """
         with self.assertRaisesRegex(ValueError, "duplicate key"):

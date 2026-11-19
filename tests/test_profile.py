@@ -18,7 +18,7 @@ def _profile_data(name: str = "test_profile") -> dict:
         "image": "test:image",
         "workdir": "/workspace",
         "mounts": [],
-        "omp_binary": "/usr/local/bin/omp",
+        "pi_binary": "/opt/pi/pi",
     }
 
 
@@ -45,11 +45,14 @@ class TestProfileLoading(unittest.TestCase):
         """Keep the shipped trusted profile valid and fingerprinted."""
         profile = load_profile("gigachad")
 
-        self.assertIsInstance(profile.env_passthrough, tuple)
-        self.assertIn("OPENAI_API_KEY", profile.env_passthrough)
-        self.assertIn("/root/.omp", [mount.target for mount in profile.mounts])
-        self.assertNotIn("/home/sandbox/.omp", [mount.target for mount in profile.mounts])
-        self.assertEqual(dict(profile.host_services), {"OLLAMA_HOST": 11434})
+        self.assertEqual(profile.env_passthrough, ())
+        self.assertEqual(profile.pi_binary, "/opt/pi/pi")
+        self.assertIn("/opt/pi", [mount.target for mount in profile.mounts])
+        self.assertFalse(any(".pi" in mount.source or ".omp" in mount.source for mount in profile.mounts))
+        with patch.dict(os.environ, {"PI_GATEWAY_PORT": ""}):
+            self.assertEqual(dict(load_profile("gigachad").host_services), {"PI_GATEWAY_URL": 8300})
+        with patch.dict(os.environ, {"PI_GATEWAY_PORT": "8301"}):
+            self.assertEqual(dict(load_profile("gigachad").host_services), {"PI_GATEWAY_URL": 8301})
         self.assertRegex(profile.runtime_fingerprint, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(profile.runtime_fingerprint, load_profile("gigachad").runtime_fingerprint)
 
@@ -58,12 +61,12 @@ class TestProfileLoading(unittest.TestCase):
             profile = self._load(
                 {
                     **_profile_data(),
-                    "mounts": [{"source": "${HOME}/.omp", "target": "/root/.omp", "mode": "ro"}],
+                    "mounts": [{"source": "${HOME}/pi", "target": "/opt/pi", "mode": "ro"}],
                     "python_interpreters": {"venv": "${HOME}/venv/bin/python3"},
                 }
             )
 
-        self.assertEqual(profile.mounts[0].source, "/home/alice/.omp")
+        self.assertEqual(profile.mounts[0].source, "/home/alice/pi")
         self.assertEqual(profile.python_interpreters["venv"], "/home/alice/venv/bin/python3")
 
     def test_load_profile_prefers_earliest_search_directory(self) -> None:
@@ -95,7 +98,7 @@ class TestProfileLoading(unittest.TestCase):
             (lambda data: data.update({"extra": True}), "unsupported field"),
             (lambda data: data.update({"image": ""}), "image must be a nonempty string"),
             (lambda data: data.update({"workdir": "workspace"}), "workdir must be an absolute path"),
-            (lambda data: data.update({"omp_binary": "/usr/local/../bin/omp"}), "omp_binary must be an absolute path"),
+            (lambda data: data.update({"pi_binary": "/opt/../pi"}), "pi_binary must be an absolute path"),
             (lambda data: data.update({"workspace": {"mode": "managed"}}), "unsupported field 'workspace'"),
         )
         for mutate, error in cases:
@@ -142,7 +145,9 @@ class TestProfileLoading(unittest.TestCase):
             ("env_passthrough", ["INVALID-NAME"], "environment variable names"),
             ("env_passthrough", ["OPENAI_API_KEY", "OPENAI_API_KEY"], "must not contain duplicates"),
             ("host_services", {"INVALID-NAME": 11434}, "environment variable names"),
-            ("host_services", {"OLLAMA_HOST": True}, "host ports"),
+            ("host_services", {"SERVICE_HOST": True}, "host ports"),
+            ("host_services", {"SERVICE_HOST": "8300"}, "host ports"),
+            ("host_services", {"SERVICE_HOST": "${UNSET_TEST_PORT:-0}"}, "host ports"),
         )
         for field, value, error in cases:
             with self.subTest(field=field, value=value):
@@ -158,7 +163,7 @@ name: duplicate
 image: test:image
 workdir: /workspace
 mounts: []
-omp_binary: /usr/local/bin/omp
+pi_binary: /opt/pi/pi
 """
         with self.assertRaisesRegex(ProfileError, "duplicate key"):
             self._load_yaml(text)
@@ -169,17 +174,17 @@ omp_binary: /usr/local/bin/omp
             image="test:image",
             workdir="/workspace",
             mounts=(Mount("/host/a", "/opt/a", "ro"), Mount("/host/b", "/opt/b", "rw")),
-            omp_binary="/usr/local/bin/omp",
+            pi_binary="/opt/pi/pi",
             python_interpreters={"venv": "/opt/venv/bin/python", "base": "/opt/base/python"},
             env_passthrough=("OPENAI_API_KEY", "TAVILY_API_KEY"),
-            host_services={"OLLAMA_HOST": 11434, "SERVICE_HOST": 8080},
+            host_services={"PI_GATEWAY_URL": 8300, "SERVICE_HOST": 8080},
         )
         variants = (
             replace(profile, name="other_profile"),
             replace(profile, image="other:image"),
             replace(profile, workdir="/project"),
             replace(profile, mounts=(Mount("/host/c", "/opt/c", "ro"),)),
-            replace(profile, omp_binary="/opt/omp"),
+            replace(profile, pi_binary="/opt/other/pi"),
             replace(profile, python_interpreters={"base": "/opt/base/python"}),
             replace(profile, env_passthrough=("GEMINI_API_KEY",)),
             replace(profile, host_services={"SERVICE_HOST": 8080}),
@@ -197,7 +202,7 @@ omp_binary: /usr/local/bin/omp
         self.assertEqual(reordered.runtime_fingerprint, fingerprint)
         with patch.dict(os.environ, {"OPENAI_API_KEY": "secret-value-that-must-not-affect-the-fingerprint"}):
             self.assertEqual(profile.runtime_fingerprint, fingerprint)
-        with patch("agent_sandbox.profile.RUNTIME_POLICY_DESCRIPTOR", "agent-sandbox-runtime-policy-v6"):
+        with patch("agent_sandbox.profile.RUNTIME_POLICY_DESCRIPTOR", "agent-sandbox-runtime-policy-v7"):
             self.assertNotEqual(replace(profile).runtime_fingerprint, fingerprint)
 
 

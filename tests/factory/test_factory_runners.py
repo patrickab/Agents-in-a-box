@@ -147,8 +147,8 @@ def demo_profile(monkeypatch: pytest.MonkeyPatch) -> None:
         name="demo",
         image="img",
         workdir="/workspace",
-        mounts=(Mount("/host/AGENTS.md", "/workspace/AGENTS.md", "ro"), Mount("/host/omp", "/usr/local/bin/omp", "ro")),
-        omp_binary="/usr/local/bin/omp",
+        mounts=(Mount("/host/AGENTS.md", "/workspace/AGENTS.md", "ro"), Mount("/host/pi", "/opt/pi", "ro")),
+        pi_binary="/opt/pi/pi",
     )
     monkeypatch.setattr(runners, "load_profile", lambda name: profile)
 
@@ -156,7 +156,7 @@ def demo_profile(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_sandbox_runner_round_trips_worktree_session_and_envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Drive SandboxRunner against a fake Sandbox: the worktree and session survive across turns."""
     from agent_sandbox import StreamEvent
-    from agent_sandbox.manifest import Execution, OmpSessionState, Outputs, SandboxManifest, WorkspaceRef
+    from agent_sandbox.manifest import Execution, Outputs, PiSessionState, SandboxManifest, WorkspaceRef
 
     worktree = tmp_path / "wt"
     (worktree / "src").mkdir(parents=True)
@@ -198,13 +198,13 @@ def test_sandbox_runner_round_trips_worktree_session_and_envelope(tmp_path: Path
             capture = str(tmp_path / f"capture{len(invocations)}.tar")
             workspace = WorkspaceArchive.from_directory(str(scratch), capture, exclude=())
             manifest = SandboxManifest(
-                schema_version=1,
+                schema_version=2,
                 manifest_id=f"m{len(invocations)}",
                 profile="demo",
                 runtime_fingerprint="sha256:" + "0" * 64,
                 workspace=WorkspaceRef(None, workspace.sha256),
                 outputs=Outputs(None, ()),
-                omp_sessions={"main": OmpSessionState("main", None)},
+                pi_sessions={"main": PiSessionState("main", None)},
                 execution=Execution("run", "completed", 0, "2026-01-01T00:00:00+00:00"),
             )
             return FakeSandboxRun(workspace, (StreamEvent("stdout", "sandbox says hi"),), "completed", manifest)

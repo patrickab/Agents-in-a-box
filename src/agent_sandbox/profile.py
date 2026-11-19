@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 import hashlib
 import json
+import os
 from pathlib import Path
 import posixpath
 import re
@@ -18,9 +19,11 @@ from agent_sandbox.config import PROFILE_SEARCH_PATH, RUNTIME_POLICY_DESCRIPTOR
 from agent_sandbox.errors import ProfileError
 
 _ENVIRONMENT_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A host-service port may name an environment variable with a default, e.g. `${PI_GATEWAY_PORT:-8300}`.
+_PORT_REFERENCE_PATTERN = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):-([0-9]+)\}$")
 _RUNTIME_OWNED_TARGET = "/runtime"
 _OPTIONAL_FIELDS = frozenset({"python_interpreters", "env_passthrough", "host_services"})
-_PROFILE_FIELDS = frozenset({"name", "image", "workdir", "mounts", "omp_binary"}) | _OPTIONAL_FIELDS
+_PROFILE_FIELDS = frozenset({"name", "image", "workdir", "mounts", "pi_binary"}) | _OPTIONAL_FIELDS
 
 
 @dataclass(frozen=True)
@@ -44,7 +47,7 @@ class Profile:
     image: str
     workdir: str
     mounts: tuple[Mount, ...]
-    omp_binary: str
+    pi_binary: str
     python_interpreters: Mapping[str, str] = field(default_factory=dict)  # Label -> absolute interpreter path.
     env_passthrough: tuple[str, ...] = ()
     host_services: Mapping[str, int] = field(default_factory=dict)  # Environment variable -> host port.
@@ -71,7 +74,7 @@ class Profile:
                     ({"source": mount.source, "target": mount.target, "mode": mount.mode} for mount in self.mounts),
                     key=lambda mount: (mount["source"], mount["target"], mount["mode"]),
                 ),
-                "omp_binary": self.omp_binary,
+                "pi_binary": self.pi_binary,
                 "python_interpreters": dict(self.python_interpreters),
                 "env_passthrough": sorted(self.env_passthrough),
                 "host_services": dict(self.host_services),
@@ -124,7 +127,7 @@ def _parse_profile(name: str, data: object) -> Profile:
         image=image,
         workdir=workdir,
         mounts=_parse_mounts(root["mounts"], workdir),
-        omp_binary=_require_absolute_path("omp_binary", root["omp_binary"]),
+        pi_binary=_require_absolute_path("pi_binary", root["pi_binary"]),
         python_interpreters=_parse_python_interpreters(root.get("python_interpreters", {})),
         env_passthrough=_parse_env_passthrough(root.get("env_passthrough", [])),
         host_services=_parse_host_services(root.get("host_services", {})),
@@ -183,9 +186,19 @@ def _parse_env_passthrough(data: object) -> tuple[str, ...]:
 
 def _parse_host_services(data: object) -> dict[str, int]:
     services: Mapping[Any, Any] = require_mapping(data, "host_services")
-    for service_name, port in services.items():
+    resolved = {}
+    for service_name, value in services.items():
         if not isinstance(service_name, str) or not _ENVIRONMENT_NAME_PATTERN.fullmatch(service_name):
             raise ValueError("host_services must use environment variable names")
+        reference = _PORT_REFERENCE_PATTERN.fullmatch(value) if isinstance(value, str) else None
+        port = _resolve_port(reference) if reference else value
         if type(port) is not int or not 0 < port < 65536:
             raise ValueError("host_services must map environment variable names to host ports")
-    return dict(services)
+        resolved[service_name] = port
+    return resolved
+
+
+def _resolve_port(reference: re.Match[str]) -> int | str:
+    """Read a referenced port from the environment, falling back to its default."""
+    value = os.environ.get(reference.group(1)) or reference.group(2)
+    return int(value) if value.isdigit() else value

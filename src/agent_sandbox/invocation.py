@@ -1,4 +1,4 @@
-"""Run idempotent managed OMP invocations for caller-owned sandbox slots.
+"""Run idempotent managed Pi invocations for caller-owned sandbox slots.
 
 Resolve and upload durable assets outside this module. Logical slots share a
 result cache while the runtime serializes physical container use.
@@ -15,10 +15,10 @@ from typing import Literal
 from agent_sandbox._validation import is_safe_name, require_nonempty_string
 from agent_sandbox.archive import WorkspaceArchive, read_member
 from agent_sandbox.config import MAX_RETAINED_OUTPUT_BYTES, runtime_resource_names
-from agent_sandbox.manifest import Execution, OmpSessionState, Outputs, SandboxManifest, WorkspaceRef
-from agent_sandbox.omp import OmpTask, OutputEvent, to_output_events
+from agent_sandbox.manifest import MANIFEST_SCHEMA_VERSION, Execution, Outputs, PiSessionState, SandboxManifest, WorkspaceRef
+from agent_sandbox.pi import OutputEvent, PiTask, to_output_events
 from agent_sandbox.profile import load_profile
-from agent_sandbox.runtime import ExecResult, ManagedExecutionResult, SandboxRuntime, WorkspaceRestore
+from agent_sandbox.runtime import ManagedExecutionResult, SandboxRuntime, WorkspaceRestore
 
 RunStatus = Literal["completed", "failed"]
 
@@ -30,8 +30,8 @@ class SandboxInvocation:
     slot_key: str  # Deterministic caller-owned sandbox slot; runs in one slot are serialized.
     profile_name: str
     run_id: str  # Upstream tool-call identity; repeated runs with it return the cached result.
-    task: OmpTask
-    active_manifest: SandboxManifest | None = None  # Resume this manifest's OMP session.
+    task: PiTask
+    active_manifest: SandboxManifest | None = None  # Resume this manifest's Pi session.
     workspace: WorkspaceArchive | None = None  # Caller-downloaded snapshot to restore.
 
     def __post_init__(self) -> None:
@@ -39,8 +39,8 @@ class SandboxInvocation:
         require_nonempty_string("run_id", self.run_id)
         if not is_safe_name(self.profile_name):
             raise ValueError("profile_name must be a safe profile name")
-        if not isinstance(self.task, OmpTask):
-            raise TypeError("task must be an OmpTask")
+        if not isinstance(self.task, PiTask):
+            raise TypeError("task must be a PiTask")
         if self.workspace is not None and not isinstance(self.workspace, WorkspaceArchive):
             raise TypeError("workspace must be a WorkspaceArchive or None")
         if self.active_manifest is None:
@@ -129,14 +129,13 @@ class Sandbox:
         profile = load_profile(invocation.profile_name)
         execution = SandboxRuntime(profile, self._resource_names).execute(invocation.task, invocation.restore)
         try:
-            exec_result = execution.exec_result
-            status: RunStatus = "completed" if exec_result.exit_code == 0 else "failed"
+            status: RunStatus = "completed" if execution.exit_code == 0 and execution.outcome.error is None else "failed"
             prior = invocation.workspace
             run = SandboxRun(
                 status=status,
-                summary=_bounded_summary(exec_result, status),
+                summary=_bounded_summary(execution, status),
                 next_manifest=_build_manifest(profile.name, invocation.run_id, execution, status),
-                outputs=to_output_events(exec_result.exit_code, exec_result.stdout, exec_result.stderr),
+                outputs=to_output_events(execution.exit_code, execution.outcome, execution.stderr),
                 workspace_changed=prior is None or prior.sha256 != execution.workspace.sha256,
                 workspace=execution.workspace,
                 _on_release=lambda: self._evict(key, run),
@@ -148,9 +147,11 @@ class Sandbox:
         return run
 
 
-def _bounded_summary(exec_result: ExecResult, status: RunStatus, limit: int = 400) -> str:
-    """Return a bounded execution summary for outer-model context."""
-    text = (exec_result.stdout.strip() or exec_result.stderr.strip() or "(no output)").replace("\n", " ")
+def _bounded_summary(execution: ManagedExecutionResult, status: RunStatus, limit: int = 400) -> str:
+    """Return a bounded execution summary for outer-model context, preferring Pi's final text, then its failure."""
+    text = (
+        execution.outcome.text.strip() or (execution.outcome.error or "").strip() or execution.stderr.strip() or "(no output)"
+    ).replace("\n", " ")
     if len(text) > limit:
         text = text[: limit - 1] + "\u2026"
     return f"[{status}] {text}"
@@ -160,17 +161,17 @@ def _build_manifest(profile_name: str, run_id: str, execution: ManagedExecutionR
     """Build the next immutable manifest without host-local references."""
     sha256 = execution.workspace.sha256
     return SandboxManifest(
-        schema_version=1,
+        schema_version=MANIFEST_SCHEMA_VERSION,
         manifest_id=f"{run_id}-{sha256[:16]}",
         profile=profile_name,
         runtime_fingerprint=execution.runtime_fingerprint,
         workspace=WorkspaceRef(snapshot_asset_id=None, sha256=sha256),
         outputs=Outputs(events_asset_id=None, artifacts=()),
-        omp_sessions={"main": OmpSessionState(session_id="main", state_asset_id=None)},
+        pi_sessions={"main": PiSessionState(session_id="main", state_asset_id=None)},
         execution=Execution(
             run_id=run_id,
             status=status,
-            exit_code=execution.exec_result.exit_code,
+            exit_code=execution.exit_code,
             created_at=datetime.now(timezone.utc).isoformat(),
         ),
     )
