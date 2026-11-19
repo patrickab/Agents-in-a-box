@@ -1,4 +1,4 @@
-"""Test the work and merge pipelines with a scripted fake omp, real git, and the real store (DBOS for the human-loop flows)."""
+"""Test the work and merge pipelines with a scripted fake Pi, real git, and the real store (DBOS for the human-loop flows)."""
 
 from collections.abc import Iterator
 import json
@@ -22,19 +22,19 @@ from agent_sandbox.factory.engine import Engine
 from agent_sandbox.factory.models import MessageCreate, Overrides, RepoCreate, TaskCreate
 from agent_sandbox.factory.store import Store
 
-FAKE_OMP = """\
+FAKE_PI = """\
 #!{python}
 import json, os, pathlib, sys
 
 args = sys.argv[1:]
-script = pathlib.Path(os.environ["FAKE_OMP_SCRIPT"])
+script = pathlib.Path(os.environ["FAKE_PI_SCRIPT"])
 steps = json.loads(script.read_text())
 step = steps.pop(0)
 script.write_text(json.dumps(steps))
 session = pathlib.Path(args[args.index("--session-dir") + 1])
 (session / "session.jsonl").touch()
 phase = session.name
-with open(os.environ["FAKE_OMP_LOG"], "a") as log:
+with open(os.environ["FAKE_PI_LOG"], "a") as log:
     log.write(json.dumps({{"phase": phase, "prompt": args[-1], "continue": "--continue" in args}}) + "\\n")
 for relative, content in step.get("edit", {{}}).items():
     path = pathlib.Path(relative)
@@ -44,6 +44,8 @@ envelope = step.get("envelope", {{"status": "ok", "summary": f"{{phase}} done", 
 if envelope is not None:
     out = pathlib.Path(".factory/out"); out.mkdir(parents=True, exist_ok=True)
     (out / f"{{phase}}.json").write_text(json.dumps(envelope))
+final = {{"role": "assistant", "content": [{{"type": "text", "text": f"{{phase}} turn done"}}], "stopReason": "stop"}}
+print(json.dumps({{"type": "message_end", "message": final}}))
 """
 
 TASK_ID = "task00000001"
@@ -54,11 +56,11 @@ class Harness:
 
     def __init__(self, engine: Engine, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_name: str = "demo") -> None:
         self.engine, self.repo, self.tmp_path, self.repo_name = engine, repo, tmp_path, repo_name
-        self.script = tmp_path / "omp-script.json"
-        self.log = tmp_path / "omp-log.jsonl"
+        self.script = tmp_path / "pi-script.json"
+        self.log = tmp_path / "pi-log.jsonl"
         self.monkeypatch = monkeypatch
 
-    def script_omp(self, *steps: dict[str, Any]) -> None:
+    def script_pi(self, *steps: dict[str, Any]) -> None:
         self.script.write_text(json.dumps(list(steps)))
         self.log.write_text("")
 
@@ -93,15 +95,15 @@ class Harness:
 
 @pytest.fixture
 def harness(repo: Path, tmp_path: Path, database_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness]:
-    omp = tmp_path / "bin/omp"
-    omp.parent.mkdir()
-    omp.write_text(FAKE_OMP.format(python=sys.executable))
-    omp.chmod(omp.stat().st_mode | stat.S_IEXEC)
+    pi = tmp_path / "bin/pi"
+    pi.parent.mkdir()
+    pi.write_text(FAKE_PI.format(python=sys.executable))
+    pi.chmod(pi.stat().st_mode | stat.S_IEXEC)
     write(repo / ".factory/workflows/review.yaml", "name: Code and review\nphases: [code, review]\nmax_rounds: 3\npreview: false\n")
     write(repo / ".factory/workflows/full.yaml", "name: Full\nphases: [scout, plan, code]\npreview: false\n")
     write(repo / ".factory/workflows/auto.yaml", "name: Auto\nphases: [code]\nmerge: auto\npreview: false\n")
     for name, phase in (("scout", "scout"), ("planner", "plan"), ("reviewer", "review")):
-        write(repo / f".omp/agents/{name}.md", f"---\nname: {name}\ndescription: {phase}\n---\nYou are the {phase} agent.\n")
+        write(repo / f".factory/agents/{name}.md", f"---\nname: {name}\ndescription: {phase}\n---\nYou are the {phase} agent.\n")
     git(repo, "add", "-A")
     git(repo, "commit", "-qm", "more templates")
     config = EngineConfig(
@@ -109,14 +111,14 @@ def harness(repo: Path, tmp_path: Path, database_url: str, monkeypatch: pytest.M
         state_dir=tmp_path / "state",
         worktree_root=tmp_path / "worktrees",
         defaults_dir=tmp_path / "defaults",
-        omp_binary=str(omp),
+        pi_binary=str(pi),
     )
     store = Store(database_url)
     store.register_repo(str(repo), "demo")
     engine = Engine(config, store, FakePreviews(), RecordingDispatcher())
     workflows.bind_engine(engine)
-    monkeypatch.setenv("FAKE_OMP_SCRIPT", str(tmp_path / "omp-script.json"))
-    monkeypatch.setenv("FAKE_OMP_LOG", str(tmp_path / "omp-log.jsonl"))
+    monkeypatch.setenv("FAKE_PI_SCRIPT", str(tmp_path / "pi-script.json"))
+    monkeypatch.setenv("FAKE_PI_LOG", str(tmp_path / "pi-log.jsonl"))
     yield Harness(engine, repo, tmp_path, monkeypatch)
     workflows.bind_engine(None)
 
@@ -128,7 +130,7 @@ def set_gates(repo: Path, *gates: list[str]) -> None:
 
 def test_happy_path_ends_in_human_review_with_uncommitted_changes(harness: Harness) -> None:
     config, _ = harness.create()
-    harness.script_omp({"edit": {"feature.py": "ok = True\n"}})
+    harness.script_pi({"edit": {"feature.py": "ok = True\n"}})
 
     assert harness.run_work(config) == "human_review"
 
@@ -150,7 +152,7 @@ def test_zero_config_repo_runs_scout_plan_code_review_and_merges_with_packaged_d
     name = harness.engine.register_repo(RepoCreate(path=str(bare_repo))).name
     zero_config = Harness(harness.engine, bare_repo, harness.tmp_path, harness.monkeypatch, repo_name=name)
     config, task_config = zero_config.create("scout-plan-code-review", sandbox=False)
-    zero_config.script_omp(
+    zero_config.script_pi(
         {"envelope": {"status": "ok", "summary": "hello.txt holds the greeting", "relevant_files": ["hello.txt"], "notes": ""}},
         {"envelope": {"status": "ok", "summary": "one step", "steps": ["edit hello.txt"]}},
         {"edit": {"hello.txt": "hello world\n"}},
@@ -175,7 +177,7 @@ def test_zero_config_repo_runs_scout_plan_code_review_and_merges_with_packaged_d
 
 def test_protected_write_is_reverted_and_the_agent_is_told(harness: Harness) -> None:
     config, _ = harness.create()
-    harness.script_omp({"edit": {"factory.yaml": "gates: []\n", "feature.py": "v = 1\n"}}, {"edit": {"feature.py": "v = 2\n"}})
+    harness.script_pi({"edit": {"factory.yaml": "gates: []\n", "feature.py": "v = 1\n"}}, {"edit": {"feature.py": "v = 2\n"}})
 
     assert harness.run_work(config) == "human_review"
 
@@ -191,7 +193,7 @@ def test_protected_write_is_reverted_and_the_agent_is_told(harness: Harness) -> 
 
 def test_writes_under_factory_out_never_count_as_breaches(harness: Harness) -> None:
     config, _ = harness.create()
-    harness.script_omp(
+    harness.script_pi(
         {"edit": {"feature.py": "v = 1\n", ".factory/out/scenario.py": "print('{}')\n", ".factory/out/notes.txt": "x\n"}}
     )
 
@@ -215,7 +217,7 @@ def test_gate_failure_feeds_output_back_and_counts_as_a_round(harness: Harness) 
     set_gates(harness.repo, gate)
     git(harness.repo, "commit", "-qam", "gate")
     config, _ = harness.create()
-    harness.script_omp({"edit": {"a.py": "1\n"}}, {"edit": {"a.py": "2\n"}})
+    harness.script_pi({"edit": {"a.py": "1\n"}}, {"edit": {"a.py": "2\n"}})
 
     assert harness.run_work(config) == "human_review"
 
@@ -229,7 +231,7 @@ def test_exhausted_rounds_block_the_task(harness: Harness) -> None:
     set_gates(harness.repo, [sys.executable, "-c", "print('always red'); raise SystemExit(1)"])
     git(harness.repo, "commit", "-qam", "red gate")
     config, _ = harness.create(max_rounds=2)
-    harness.script_omp({}, {})
+    harness.script_pi({}, {})
 
     assert harness.run_work(config) == "blocked"
 
@@ -242,7 +244,7 @@ def test_exhausted_rounds_block_the_task(harness: Harness) -> None:
 
 def test_agent_failure_with_a_question_blocks_with_the_question(harness: Harness) -> None:
     config, _ = harness.create()
-    harness.script_omp(
+    harness.script_pi(
         {"envelope": {"status": "fail", "summary": "stuck", "changed_files": [], "question": "Which database should I use?"}}
     )
 
@@ -252,7 +254,7 @@ def test_agent_failure_with_a_question_blocks_with_the_question(harness: Harness
 
 def test_malformed_envelope_is_corrected_once_then_blocks(harness: Harness) -> None:
     config, _ = harness.create()
-    harness.script_omp({"envelope": None}, {"envelope": None})
+    harness.script_pi({"envelope": None}, {"envelope": None})
 
     assert harness.run_work(config) == "blocked"
     assert "envelope" in harness.task().error
@@ -261,7 +263,7 @@ def test_malformed_envelope_is_corrected_once_then_blocks(harness: Harness) -> N
 
 def test_malformed_envelope_recovers_after_the_correction_turn(harness: Harness) -> None:
     config, _ = harness.create()
-    harness.script_omp({"envelope": None}, {})
+    harness.script_pi({"envelope": None}, {})
 
     assert harness.run_work(config) == "human_review"
     assert "could not be used" in harness.calls()[1]["prompt"]
@@ -271,7 +273,7 @@ def test_review_findings_go_back_to_the_coder_until_approved(harness: Harness) -
     config, _ = harness.create("review")
     approved = {"status": "ok", "approved": True, "findings": []}
     rejected = {"status": "ok", "approved": False, "findings": ["missing a test"]}
-    harness.script_omp(
+    harness.script_pi(
         {"edit": {"a.py": "1\n"}},
         {"envelope": rejected, "edit": {"sneaky.py": "reviewers must not write\n"}},
         {"edit": {"a.py": "2\n"}},
@@ -289,7 +291,7 @@ def test_review_findings_go_back_to_the_coder_until_approved(harness: Harness) -
 
 def test_scout_and_plan_feed_the_coder_and_cannot_write(harness: Harness) -> None:
     config, _ = harness.create("full")
-    harness.script_omp(
+    harness.script_pi(
         {
             "envelope": {"status": "ok", "summary": "auth lives in auth.py", "relevant_files": ["auth.py"], "notes": ""},
             "edit": {"leak.txt": "x"},
@@ -311,14 +313,14 @@ def test_retry_skips_finished_scout_and_plan_and_continues_the_coder_session(har
     config, _ = harness.create("full")
     scout = {"status": "ok", "summary": "s", "relevant_files": [], "notes": ""}
     plan = {"status": "ok", "summary": "p", "steps": ["one"]}
-    harness.script_omp(
+    harness.script_pi(
         {"envelope": scout},
         {"envelope": plan},
         {"envelope": {"status": "fail", "summary": "no", "changed_files": [], "question": None}},
     )
     assert harness.run_work(config) == "blocked"
 
-    harness.script_omp({"edit": {"done.py": "1\n"}})
+    harness.script_pi({"edit": {"done.py": "1\n"}})
     assert harness.run_work(config, entry="retry") == "human_review"
 
     (call,) = harness.calls()
@@ -327,11 +329,11 @@ def test_retry_skips_finished_scout_and_plan_and_continues_the_coder_session(har
 
 def test_rework_runs_the_coder_with_feedback_and_skips_review(harness: Harness) -> None:
     config, _ = harness.create("review")
-    harness.script_omp({"edit": {"a.py": "1\n"}}, {"envelope": {"status": "ok", "approved": True, "findings": []}})
+    harness.script_pi({"edit": {"a.py": "1\n"}}, {"envelope": {"status": "ok", "approved": True, "findings": []}})
     harness.run_work(config)
     harness.engine.store.update_task(TASK_ID, state="rework")
 
-    harness.script_omp({"edit": {"a.py": "2\n"}})
+    harness.script_pi({"edit": {"a.py": "2\n"}})
     assert harness.run_work(config, entry="rework", feedback={"text": "rename it please", "images": []}) == "human_review"
 
     (call,) = harness.calls()
@@ -341,14 +343,14 @@ def test_rework_runs_the_coder_with_feedback_and_skips_review(harness: Harness) 
 
 def test_auto_merge_workflows_skip_the_review_stop(harness: Harness) -> None:
     config, _ = harness.create("auto")
-    harness.script_omp({"edit": {"a.py": "1\n"}})
+    harness.script_pi({"edit": {"a.py": "1\n"}})
     assert harness.run_work(config) == "merge"
     assert harness.task().state == "in_progress"
 
 
 def approved_work(harness: Harness, files: dict[str, str]) -> dict[str, Any]:
     config, _ = harness.create()
-    harness.script_omp({"edit": files})
+    harness.script_pi({"edit": files})
     assert harness.run_work(config) == "human_review"
     return config
 
@@ -458,7 +460,7 @@ def wait_for_state(store: Store, task_id: str, state: str, timeout_s: float = 60
 
 def test_retry_restarts_a_task_workflow_that_ended_and_resumes_the_coder_session(harness: Harness, dbos_runtime: None) -> None:
     harness.engine.dispatcher = workflows.DbosDispatcher()
-    harness.script_omp({"edit": {"feature.py": "v = 1\n"}}, {"edit": {"feature.py": "v = 2\n"}})
+    harness.script_pi({"edit": {"feature.py": "v = 1\n"}}, {"edit": {"feature.py": "v = 2\n"}})
     store = harness.engine.store
 
     task_id = harness.engine.create_task(TaskCreate(repo="demo", workflow="code", title="Add feature", request="make it so")).id
@@ -481,7 +483,7 @@ def test_retry_restarts_a_task_workflow_that_ended_and_resumes_the_coder_session
 def run_to_human_review(harness: Harness, *steps: dict[str, Any]) -> str:
     """Create a code task on the DBOS dispatcher and wait until it needs the human."""
     harness.engine.dispatcher = workflows.DbosDispatcher()
-    harness.script_omp(*steps)
+    harness.script_pi(*steps)
     task_id = harness.engine.create_task(TaskCreate(repo="demo", workflow="code", title="Add feature", request="make it so")).id
     wait_for_state(harness.engine.store, task_id, "human_review")
     return task_id

@@ -33,10 +33,18 @@ def test_invalid_envelopes_raise_with_a_correction_ready_message(phase: str, raw
         parse_envelope(phase, raw)
 
 
-TURN = AgentTurn(phase="code", prompt="do it", system_prompt="sys", output_path=".factory/out/code.json")
+TURN = AgentTurn(phase="code", prompt="do it", system_prompt="sys", output_path=".factory/out/code.json", model="anthropic/claude")
 
 
-def write_fake_omp(path: Path, body: str) -> Path:
+def assistant_end(text: str, stop_reason: str = "stop", error: str | None = None) -> str:
+    """Return one Pi JSON-mode `message_end` record of an assistant message."""
+    message = {"role": "assistant", "content": [{"type": "text", "text": text}], "stopReason": stop_reason}
+    if error is not None:
+        message["errorMessage"] = error
+    return json.dumps({"type": "message_end", "message": message})
+
+
+def write_fake_pi(path: Path, body: str) -> Path:
     path.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(body), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return path
@@ -46,21 +54,53 @@ def test_local_runner_deletes_a_stale_envelope_before_the_turn(tmp_path: Path) -
     worktree = tmp_path / "wt"
     (worktree / ".factory/out").mkdir(parents=True)
     (worktree / ".factory/out/code.json").write_text(json.dumps(VALID_CODE))
-    omp = write_fake_omp(tmp_path / "omp", "print('does nothing')\n")
-    result = LocalRunner("task00000001", worktree, tmp_path / "task", omp_binary=str(omp)).agent_turn(TURN)
+    pi = write_fake_pi(tmp_path / "pi", f"print({assistant_end('does nothing')!r})\n")
+    result = LocalRunner("task00000001", worktree, tmp_path / "task", pi_binary=str(pi)).agent_turn(TURN)
     assert result.envelope is None
+
+
+def test_local_runner_runs_host_pi_and_returns_the_final_assistant_text(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    argv_file = tmp_path / "argv.json"
+    pi = write_fake_pi(
+        tmp_path / "pi",
+        f"""
+        import json, pathlib, sys
+        pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))
+        print(json.dumps({{"type": "message_update", "message": {{"role": "assistant", "content": []}}}}))
+        print({assistant_end("first")!r})
+        print({assistant_end("final answer")!r})
+        sys.stderr.write("a warning\\n")
+        """,
+    )
+    result = LocalRunner("task00000001", worktree, tmp_path / "task", pi_binary=str(pi)).agent_turn(TURN)
+
+    argv = json.loads(argv_file.read_text())
+    assert result.output == "final answer"
+    assert argv[:2] == ["--mode", "json"] and "--provider" not in argv
+    assert argv[argv.index("--model") + 1] == "anthropic/claude"
+    assert "a warning" in (tmp_path / "task/logs/code.log").read_text()
 
 
 def test_local_runner_reports_failure_and_timeout(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    failing = write_fake_omp(tmp_path / "omp-fail", "import sys\nprint('boom')\nsys.exit(3)\n")
-    with pytest.raises(AgentRunError, match=r"(?s)exited 3.*boom"):
-        LocalRunner("task00000001", worktree, tmp_path / "task", omp_binary=str(failing)).agent_turn(TURN)
+    failing = write_fake_pi(tmp_path / "pi-fail", "import sys\nsys.stderr.write('boom\\n')\nsys.exit(3)\n")
+    with pytest.raises(AgentRunError, match=r"(?s)exited 3: pi produced no final assistant message.*boom"):
+        LocalRunner("task00000001", worktree, tmp_path / "task", pi_binary=str(failing)).agent_turn(TURN)
 
-    slow = write_fake_omp(tmp_path / "omp-slow", "import time\ntime.sleep(30)\n")
+    unauthorized = write_fake_pi(tmp_path / "pi-error", f"print({assistant_end('', 'error', '401 unauthorized')!r})\n")
+    with pytest.raises(AgentRunError, match="code turn failed: 401 unauthorized"):
+        LocalRunner("task00000001", worktree, tmp_path / "task", pi_binary=str(unauthorized)).agent_turn(TURN)
+
+    silent = write_fake_pi(tmp_path / "pi-silent", "print('not json')\n")
+    with pytest.raises(AgentRunError, match="no final assistant message"):
+        LocalRunner("task00000001", worktree, tmp_path / "task", pi_binary=str(silent)).agent_turn(TURN)
+
+    slow = write_fake_pi(tmp_path / "pi-slow", "import time\ntime.sleep(30)\n")
     with pytest.raises(AgentRunError, match="exceeded 1s"):
-        LocalRunner("task00000001", worktree, tmp_path / "task", omp_binary=str(slow)).agent_turn(
+        LocalRunner("task00000001", worktree, tmp_path / "task", pi_binary=str(slow)).agent_turn(
             dataclasses.replace(TURN, timeout_s=1)
         )
 
@@ -189,7 +229,7 @@ def test_sandbox_runner_round_trips_worktree_session_and_envelope(tmp_path: Path
                 archive.extractall(scratch, filter="data")
             assert not (scratch / ".git").exists()
             (scratch / "src/a.py").write_text(f"turn {len(invocations)}\n")
-            session = scratch / ".omp-session"
+            session = scratch / ".pi-session"
             session.mkdir(exist_ok=True)
             (session / "log.jsonl").write_text(f"session after turn {len(invocations)}\n")
             (scratch / ".factory/out").mkdir(parents=True, exist_ok=True)
@@ -220,12 +260,12 @@ def test_sandbox_runner_round_trips_worktree_session_and_envelope(tmp_path: Path
     assert invocations[0].active_manifest is None
     assert invocations[1].active_manifest is not None
     assert invocations[1].active_manifest.workspace.sha256 == invocations[1].workspace.sha256  # re-pinned to the rebuilt archive
-    assert ".omp-session" not in restored_names[0]
-    assert ".omp-session/log.jsonl" in restored_names[1] and "src/a.py" in restored_names[1] and ".git" not in restored_names[1]
+    assert ".pi-session" not in restored_names[0]
+    assert ".pi-session/log.jsonl" in restored_names[1] and "src/a.py" in restored_names[1] and ".git" not in restored_names[1]
     assert (worktree / "src/a.py").read_text() == "turn 2\n"
     assert "AGENTS.md" not in restored_names[0]  # profile mounts inside the workdir are neither archived...
     assert (worktree / "AGENTS.md").read_text() == "host-mounted in the container\n"  # ...nor deleted by extraction
-    assert not (worktree / ".omp-session").exists() and (worktree / ".git").is_file()
+    assert not (worktree / ".pi-session").exists() and (worktree / ".git").is_file()
     assert not any(set(name.split("/")) & {".venv", "node_modules", ".next", "__pycache__"} for name in restored_names[1])
     assert ".factory/out/stale.json" not in restored_names[1] and ".factory/out/scenario.py" in restored_names[1]
     assert all((worktree / relative).read_text() == "host only\n" for relative in kept_on_host)

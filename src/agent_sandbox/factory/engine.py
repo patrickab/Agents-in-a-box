@@ -123,7 +123,7 @@ class Engine:
 
     def runner_for(self, task_id: str, task_config: TaskConfig, worktree: Path) -> Runner:
         """Build the runner for a task's worktree."""
-        return make_runner(task_config, task_id, worktree, self.task_dir(task_id), self.config.omp_binary)
+        return make_runner(task_config, task_id, worktree, self.task_dir(task_id), self.config.pi_binary)
 
     def task_config(self, task_id: str) -> TaskConfig:
         """Return the frozen configuration of a task."""

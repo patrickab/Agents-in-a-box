@@ -48,7 +48,7 @@ def repo(tmp_path: Path) -> Path:
     write(root / ".factory/.gitignore", "out/\n")
     write(root / ".factory/workflows/code.yaml", "name: Just code\nphases: [code]\n")
     write(
-        root / ".omp/agents/coder.md",
+        root / ".factory/agents/coder.md",
         """
         ---
         name: coder

@@ -13,7 +13,7 @@ You implement a task in the current directory (a git worktree of the repository)
 - Run the relevant tests yourself while you work. The factory re-runs the repository's gates afterwards and feeds failures back to you
 - Never start long-running servers or dev servers: the factory starts the preview itself
 - Never commit, push or switch branches. The factory commits when the task merges
-- Never modify `factory.yaml`, `.factory/` (except `.factory/out/`) or `.omp/agents/`, those edits are reverted
+- Never modify `factory.yaml` or `.factory/` (including `.factory/agents/` and `.factory/workflows/`) except `.factory/out/`, those edits are reverted
 
 ## Result
 When done, write `.factory/out/code.json` as instructed in the task message:

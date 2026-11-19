@@ -7,8 +7,9 @@ from factory_helpers import git, write
 import pytest
 
 from agent_sandbox.factory import git_ops
+from agent_sandbox.factory.config import DEFAULT_PROTECTED
 
-PROTECTED = ["factory.yaml", ".factory/**", ".omp/agents/**"]
+PROTECTED = list(DEFAULT_PROTECTED)
 
 
 @pytest.fixture
@@ -52,7 +53,7 @@ def test_changed_files_include_untracked_and_ignore_engine_owned(worktree: Path)
     write(worktree / "hello.txt", "changed\n")
     write(worktree / "new/dir/file.py", "x = 1\n")
     write(worktree / ".factory/out/code.json", "{}")
-    write(worktree / ".omp-session/s.jsonl", "{}")
+    write(worktree / ".pi-session/s.jsonl", "{}")
 
     assert sorted(git_ops.changed_files(worktree)) == ["hello.txt", "new/dir/file.py"]
     assert "+changed" in git_ops.diff_text(worktree)
@@ -83,18 +84,18 @@ def test_allowlist_breach_is_reverted_to_the_pre_turn_state(worktree: Path) -> N
     # The "agent turn": legit change, an edit to a protected file, a new protected file, a deleted tracked file, and a mode change.
     write(worktree / "src/keep.py", "legit = 2\n")
     write(worktree / "factory.yaml", "gates: [[rm, -rf, /]]\n")
-    write(worktree / ".omp/agents/evil.md", "---\nname: evil\n---\n")
+    write(worktree / ".factory/agents/evil.md", "---\nname: evil\n---\n")
     (worktree / "hello.txt").unlink()
     after = git_ops.snapshot_tree(worktree)
     changed = git_ops.tree_changes(worktree, before, after)
     breaches = git_ops.find_breaches(changed, ["**"], PROTECTED)
 
-    assert sorted(changed) == [".omp/agents/evil.md", "factory.yaml", "hello.txt", "src/keep.py"]
-    assert sorted(breaches) == [".omp/agents/evil.md", "factory.yaml"]
+    assert sorted(changed) == [".factory/agents/evil.md", "factory.yaml", "hello.txt", "src/keep.py"]
+    assert sorted(breaches) == [".factory/agents/evil.md", "factory.yaml"]
 
     git_ops.restore_paths(worktree, before, breaches)
-    assert not (worktree / ".omp/agents/evil.md").exists()
-    assert sorted(path.name for path in (worktree / ".omp/agents").iterdir()) == ["coder.md"]
+    assert not (worktree / ".factory/agents/evil.md").exists()
+    assert sorted(path.name for path in (worktree / ".factory/agents").iterdir()) == ["coder.md"]
     assert "gates: [[rm" not in (worktree / "factory.yaml").read_text()
     assert (worktree / "src/keep.py").read_text() == "legit = 2\n"
     assert not (worktree / "hello.txt").exists()

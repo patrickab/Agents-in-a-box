@@ -29,15 +29,15 @@ ENGINE_CONFIG_ENV = "AGENT_SANDBOX_FACTORY_CONFIG"
 DEFAULT_ENGINE_CONFIG_PATH = Path("~/.config/agent-sandbox/factory.yaml")
 REPO_CONFIG_FILE = "factory.yaml"
 WORKFLOWS_DIR = ".factory/workflows"
-AGENTS_DIR = ".omp/agents"
+AGENTS_DIR = ".factory/agents"
 OUTPUT_DIR = ".factory/out"
-SESSION_DIR = ".omp-session"
+SESSION_DIR = ".pi-session"  # matches the session dir the sandbox runtime writes inside the workspace
 DEFAULTS_FILE = "defaults.yaml"
 USER_AGENTS_DIR = "agents"
 DEFAULT_SANDBOX_PROFILE = "factory-default"
 REPO_PATH_PLACEHOLDER = "{repo_path}"
 REPO_PATH_KEYS = ("hooks", "gates", "preview")
-DEFAULT_PROTECTED = ("factory.yaml", ".factory/**", ".omp/agents/**")
+DEFAULT_PROTECTED = ("factory.yaml", ".factory/**")  # covers AGENTS_DIR and WORKFLOWS_DIR
 SETTINGS_KEYS = ("merge", "max_rounds", "sandbox", "models", "agent_timeout_s", "command_timeout_s")
 OVERRIDABLE_KEYS = ("merge", "max_rounds", "preview", "sandbox", "models")
 BUILTIN_DIR = resources.files("agent_sandbox.factory") / "builtin"
@@ -82,7 +82,7 @@ class EngineConfig(StrictModel):
     preview_ports: tuple[int, int] = (8100, 8199)
     limits: EngineLimits = EngineLimits()
     otel_endpoint: str | None = None
-    omp_binary: str = "omp"
+    pi_binary: str = "pi"
 
     @field_validator("state_dir", "worktree_root", "defaults_dir")
     @classmethod
@@ -407,7 +407,7 @@ def user_agent_text(defaults_dir: Path, agent_name: str) -> str:
 
 
 def load_agent(repo_path: Path, defaults_dir: Path, agent_name: str) -> AgentDef:
-    """Resolve an agent as repo `.omp/agents/<name>.md`, then user default, then packaged, expanding {repo_path} in its prompt."""
+    """Resolve an agent as repo `.factory/agents/<name>.md`, then user default, then packaged, expanding {repo_path} in its prompt."""
     path = repo_path / AGENTS_DIR / f"{agent_name}.md"
     if path.is_file():
         text, source = _read_config_text(path, "agent file"), str(path)

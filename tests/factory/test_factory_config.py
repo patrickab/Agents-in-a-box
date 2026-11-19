@@ -132,7 +132,7 @@ def test_agent_precedence_is_packaged_user_repo(bare_repo: Path, tmp_path: Path)
     assert load_agent(bare_repo, defaults_dir, "coder").prompt == "User coder."
     assert load_agent(bare_repo, defaults_dir, "scout").name == "scout"  # untouched agents stay packaged
 
-    write(bare_repo / ".omp/agents/coder.md", "---\nname: coder\n---\nRepo coder in {repo_path}.\n")
+    write(bare_repo / ".factory/agents/coder.md", "---\nname: coder\n---\nRepo coder in {repo_path}.\n")
     assert load_agent(bare_repo, defaults_dir, "coder").prompt == f"Repo coder in {bare_repo}."
     assert load_agent(bare_repo, defaults_dir, "scout").name == "scout"
 

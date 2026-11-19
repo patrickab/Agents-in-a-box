@@ -1,6 +1,6 @@
 """Run agent turns on the host (LocalRunner) or inside an AiaB sandbox (SandboxRunner); hooks and gates always run on the host."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import contextlib
 import dataclasses
 from dataclasses import dataclass
@@ -12,11 +12,12 @@ import subprocess
 import tarfile
 import tempfile
 import threading
-from typing import Protocol
+from typing import IO, Protocol
 import uuid
 
 from agent_sandbox import (
     AgentSandboxError,
+    ErrorEvent,
     PiTask,
     PromptImage,
     Sandbox,
@@ -34,10 +35,12 @@ from agent_sandbox.factory.models import Envelope, EnvelopeError, parse_envelope
 from agent_sandbox.factory.processes import terminate_process_groups
 from agent_sandbox.factory.prompts import correction_prompt
 from agent_sandbox.manifest import WorkspaceRef
-from agent_sandbox.pi import build_pi_argv
+from agent_sandbox.pi import PiEventStream, build_pi_argv
 
 OUTPUT_TAIL_CHARS = 8000
 ACTIVE_PROCESS_FILE = "active-process.json"
+STDOUT_DRAIN_GRACE_SECONDS = 10
+_STDOUT_CHUNK_BYTES = 1 << 16
 _HEAVY_DIRECTORIES = (".venv", "node_modules", ".next", "__pycache__")
 _SANDBOX_EXCLUDE = (
     ".git",
@@ -70,8 +73,8 @@ class AgentTurn:
     images: tuple[PromptImage, ...] = ()
     timeout_s: int = 3600
 
-    def omp_task(self) -> PiTask:
-        """Build the omp task this turn runs."""
+    def pi_task(self) -> PiTask:
+        """Build the Pi task this turn runs."""
         return PiTask(
             self.prompt,
             prompt_images=self.images,
@@ -157,8 +160,21 @@ def _reap_orphan(active_file: Path) -> None:
     active_file.unlink(missing_ok=True)
 
 
-def _run_logged(task_id: str, argv: Sequence[str], cwd: Path, log_path: Path, timeout_s: int) -> tuple[int, str, bool]:
-    """Run argv in its own process group, logging combined output to a file; return (exit code, output tail, timed out)."""
+def _pump(stream: IO[bytes], sink: Callable[[bytes], None]) -> None:
+    with stream:
+        while chunk := stream.read1(_STDOUT_CHUNK_BYTES):
+            sink(chunk)
+
+
+def _run_logged(
+    task_id: str,
+    argv: Sequence[str],
+    cwd: Path,
+    log_path: Path,
+    timeout_s: int,
+    stdout_sink: Callable[[bytes], None] | None = None,
+) -> tuple[int, str, bool]:
+    """Run argv in its own process group and log it, stdout going to `stdout_sink` when set; return (exit code, log tail, timeout)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     active_file = log_path.parent / ACTIVE_PROCESS_FILE
     _reap_orphan(active_file)
@@ -168,8 +184,17 @@ def _run_logged(task_id: str, argv: Sequence[str], cwd: Path, log_path: Path, ti
         log.flush()
         offset = log.tell()
         process = subprocess.Popen(
-            list(argv), cwd=cwd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True
+            list(argv),
+            cwd=cwd,
+            stdout=log if stdout_sink is None else subprocess.PIPE,
+            stderr=subprocess.STDOUT if stdout_sink is None else log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
+        pump = None
+        if stdout_sink is not None:
+            pump = threading.Thread(target=_pump, args=(process.stdout, stdout_sink), daemon=True)
+            pump.start()
         with _running_lock:
             _running.setdefault(task_id, set()).add(process)
         active_file.write_text(json.dumps({"pid": process.pid, "start": _start_time(process.pid)}), encoding="utf-8")
@@ -181,6 +206,11 @@ def _run_logged(task_id: str, argv: Sequence[str], cwd: Path, log_path: Path, ti
                 terminate_process_groups([process])
                 exit_code = process.returncode
         finally:
+            if pump is not None:
+                pump.join(STDOUT_DRAIN_GRACE_SECONDS)
+                if pump.is_alive():  # a leftover group member still holds stdout open
+                    terminate_process_groups([process])
+                    pump.join()
             active_file.unlink(missing_ok=True)
             with _running_lock:
                 _running.get(task_id, set()).discard(process)
@@ -212,11 +242,11 @@ class _HostCommands:
 
 
 class LocalRunner(_HostCommands):
-    """Run omp directly on the host inside the task worktree."""
+    """Run Pi directly on the host inside the task worktree, with the host's own Pi agent dir and models."""
 
-    def __init__(self, task_id: str, worktree: Path, task_dir: Path, omp_binary: str = "omp") -> None:
+    def __init__(self, task_id: str, worktree: Path, task_dir: Path, pi_binary: str = "pi") -> None:
         super().__init__(task_id, worktree, task_dir)
-        self.omp_binary = omp_binary
+        self.pi_binary = pi_binary
 
     def agent_turn(self, turn: AgentTurn) -> TurnResult:
         envelope_file = self.worktree / turn.output_path
@@ -232,24 +262,29 @@ class LocalRunner(_HostCommands):
         system_file.write_text(turn.system_prompt, encoding="utf-8")
         for image in turn.images:
             (images_dir / image.filename).write_bytes(image.content)
-        task = turn.omp_task()
         argv = build_pi_argv(
-            self.omp_binary,
-            task,
+            self.pi_binary,
+            turn.pi_task(),
             session_dir=str(session_dir),
             resuming=resuming,
             images_dir=str(images_dir),
             append_system_path=str(system_file),
+            provider=None,
         )
-        exit_code, output, timed_out = _run_logged(
-            self.task_id, argv, self.worktree, self.task_dir / "logs" / f"{turn.phase}.log", turn.timeout_s
+        events = PiEventStream()
+        exit_code, stderr, timed_out = _run_logged(
+            self.task_id, argv, self.worktree, self.task_dir / "logs" / f"{turn.phase}.log", turn.timeout_s, events.feed
         )
         if timed_out:
-            raise AgentRunError(f"omp {turn.phase} turn exceeded {turn.timeout_s}s")
+            raise AgentRunError(f"pi {turn.phase} turn exceeded {turn.timeout_s}s")
+        outcome = events.finish()
         if exit_code != 0:
-            raise AgentRunError(f"omp {turn.phase} turn exited {exit_code}:\n{output}")
+            detail = f": {outcome.error}" if outcome.error is not None else ""
+            raise AgentRunError(f"pi {turn.phase} turn exited {exit_code}{detail}\n{stderr}")
+        if outcome.error is not None:
+            raise AgentRunError(f"pi {turn.phase} turn failed: {outcome.error}\n{stderr}")
         envelope = envelope_file.read_bytes() if envelope_file.is_file() else None
-        return TurnResult(output, envelope)
+        return TurnResult(_tail(outcome.text), envelope)
 
 
 # --- sandbox runner ---
@@ -261,7 +296,7 @@ def _is_session_member(member: tarfile.TarInfo) -> bool:
 
 
 def _save_session_members(capture_path: str, session_tar: Path) -> None:
-    """Persist only the OMP session tree of a captured workspace."""
+    """Persist only the Pi session tree of a captured workspace."""
     session_tar.parent.mkdir(parents=True, exist_ok=True)
     temporary = session_tar.with_suffix(".tmp")
     with tarfile.open(capture_path, "r:") as source, tarfile.open(temporary, "w:") as target:
@@ -274,14 +309,14 @@ def _save_session_members(capture_path: str, session_tar: Path) -> None:
 
 
 def _append_session_members(archive_path: str, session_tar: Path) -> None:
-    """Add a saved OMP session tree to a workspace tar."""
+    """Add a saved Pi session tree to a workspace tar."""
     with tarfile.open(session_tar, "r:") as source, tarfile.open(archive_path, "a:") as target:
         for member in source:
             target.addfile(member, source.extractfile(member) if member.isfile() else None)
 
 
 class SandboxRunner(_HostCommands):
-    """Run omp turns inside an AiaB sandbox; the worktree stays authoritative between runs."""
+    """Run Pi turns inside an AiaB sandbox; the worktree stays authoritative between runs."""
 
     def __init__(self, task_id: str, worktree: Path, task_dir: Path, profile_name: str) -> None:
         super().__init__(task_id, worktree, task_dir)
@@ -325,7 +360,7 @@ class SandboxRunner(_HostCommands):
                 slot_key=f"task-{self.task_id}",
                 profile_name=self.profile_name,
                 run_id=f"{turn.phase}-{uuid.uuid4().hex}",
-                task=turn.omp_task(),
+                task=turn.pi_task(),
                 active_manifest=manifest,
                 workspace=archive,
             )
@@ -341,7 +376,8 @@ class SandboxRunner(_HostCommands):
             self._manifest_path(turn.phase).write_text(json.dumps(manifest_to_dict(run.next_manifest)), encoding="utf-8")
             output = "".join(event.text for event in run.outputs if isinstance(event, StreamEvent))
             if run.status != "completed":
-                raise AgentRunError(f"sandbox {turn.phase} turn failed:\n{_tail(output)}")
+                errors = "".join(f"{event.evalue}\n" for event in run.outputs if isinstance(event, ErrorEvent))
+                raise AgentRunError(f"sandbox {turn.phase} turn failed:\n{errors}{_tail(output)}")
             try:
                 envelope = run.read_workspace_file(turn.output_path)
             except AgentSandboxError:
@@ -349,11 +385,11 @@ class SandboxRunner(_HostCommands):
         return TurnResult(_tail(output), envelope)
 
 
-def make_runner(config: TaskConfig, task_id: str, worktree: Path, task_dir: Path, omp_binary: str) -> Runner:
+def make_runner(config: TaskConfig, task_id: str, worktree: Path, task_dir: Path, pi_binary: str) -> Runner:
     """Build the runner a task's configuration asks for."""
     if config.sandbox:
         return SandboxRunner(task_id, worktree, task_dir, config.profile)
-    return LocalRunner(task_id, worktree, task_dir, omp_binary)
+    return LocalRunner(task_id, worktree, task_dir, pi_binary)
 
 
 # --- envelope protocol ---
