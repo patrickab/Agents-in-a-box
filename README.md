@@ -91,10 +91,11 @@ Profiles are strict YAML files named `<profile>.yaml`. `AGENT_SANDBOX_PROFILE_PA
 
 Pi never sees a provider credential. Every profile declares `host_services: {PI_GATEWAY_URL: "${PI_GATEWAY_PORT:-8300}"}`, the port of pi-host's OpenAI-compatible model gateway. Each run gets a fresh Pi agent dir whose `models.json` declares one provider `gateway` at `http://10.200.200.1:<port>/v1`, with one model per entry of the gateway's model list (ids `<provider>/<id>`), plus the host's `settings.json` packages and default tools. The container receives only pi-host's gateway-only token (`PI_GATEWAY_TOKEN_FILE`, default `~/.local/state/gigachad-bot/pi-gateway.token`), which pi-host accepts on `/v1/*` alone. Select a model as `--provider gateway --model <provider>/<id>`.
 
-Host services stay bound to `127.0.0.1`. Setup creates the loopback alias `10.200.200.1` and per-port systemd proxies, defaulting to the gateway ports `8300` (development) and `8301` (production), and removes proxies for ports it no longer lists. To expose additional profile-declared ports, or configure an existing installation:
+Host services stay bound to `127.0.0.1`. Setup creates the loopback alias `10.200.200.1` and per-port systemd proxies, always keeping the gateway ports `8300` (development) and `8301` (production). It only adds proxies, never drops one you did not name. To expose an additional profile-declared port, or remove one:
 
 ```bash
-HOST_SERVICE_PORTS="8300 8301 8080" ./scripts/setup_host_services.sh
+HOST_SERVICE_PORTS="8080" ./scripts/setup_host_services.sh
+HOST_SERVICE_REMOVE_PORTS="8080" ./scripts/setup_host_services.sh
 ```
 
 </details>
