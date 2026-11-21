@@ -3,10 +3,10 @@ image: agent-sandbox:trixie
 workdir: /workspace
 mounts:
   # The mise shim is unavailable inside the sandbox image, so mount the Pi install (binary plus sibling assets).
-  - source: /home/noob/.local/share/mise/installs/pi/latest/pi
+  - source: ${HOME}/.local/share/mise/installs/pi/latest/pi
     target: /opt/pi
     mode: ro
-  - source: /home/noob/.agents/AGENTS.md
+  - source: ${HOME}/.agents/AGENTS.md
     target: /workspace/AGENTS.md
     mode: ro
 pi_binary: /opt/pi/pi

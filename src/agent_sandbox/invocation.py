@@ -17,7 +17,7 @@ from agent_sandbox.archive import WorkspaceArchive, read_member
 from agent_sandbox.config import MAX_RETAINED_OUTPUT_BYTES, runtime_resource_names
 from agent_sandbox.manifest import MANIFEST_SCHEMA_VERSION, Execution, Outputs, PiSessionState, SandboxManifest, WorkspaceRef
 from agent_sandbox.pi import OutputEvent, PiTask, to_output_events
-from agent_sandbox.profile import load_profile
+from agent_sandbox.profile import Profile, load_profile
 from agent_sandbox.runtime import ManagedExecutionResult, SandboxRuntime, WorkspaceRestore
 
 RunStatus = Literal["completed", "failed"]
@@ -33,12 +33,15 @@ class SandboxInvocation:
     task: PiTask
     active_manifest: SandboxManifest | None = None  # Resume this manifest's Pi session.
     workspace: WorkspaceArchive | None = None  # Caller-downloaded snapshot to restore.
+    profile: Profile | None = None  # Already-loaded profile (e.g. pinned per task); None loads `profile_name` now.
 
     def __post_init__(self) -> None:
         require_nonempty_string("slot_key", self.slot_key)
         require_nonempty_string("run_id", self.run_id)
         if not is_safe_name(self.profile_name):
             raise ValueError("profile_name must be a safe profile name")
+        if self.profile is not None and self.profile.name != self.profile_name:
+            raise ValueError("profile must match profile_name")
         if not isinstance(self.task, PiTask):
             raise TypeError("task must be a PiTask")
         if self.workspace is not None and not isinstance(self.workspace, WorkspaceArchive):

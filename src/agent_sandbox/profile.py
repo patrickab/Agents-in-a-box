@@ -84,17 +84,31 @@ class Profile:
         return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
 
-def load_profile(name: str) -> Profile:
-    """Load and validate the named profile from the first search-path directory that has it."""
+def profile_path(name: str) -> Path:
+    """Return the YAML file the named profile loads from: the first search-path directory that has it."""
     if not is_safe_name(name):
         raise ProfileError("profile name must be a safe profile name")
     candidates = [Path(directory) / f"{name}.yaml" for directory in PROFILE_SEARCH_PATH]
     path = next((candidate for candidate in candidates if candidate.exists()), None)
     if path is None:
         raise ProfileError(f"profile '{name}' not found; searched: {', '.join(map(str, candidates))}")
+    return path
+
+
+def load_profile(name: str) -> Profile:
+    """Load and validate the named profile from the first search-path directory that has it."""
+    return load_profile_file(profile_path(name), name)
+
+
+def load_profile_file(path: Path, name: str) -> Profile:
+    """Load and validate profile `name` from an explicit YAML file (e.g. a copy pinned when a task started)."""
+    if not is_safe_name(name):
+        raise ProfileError("profile name must be a safe profile name")
     try:
         with path.open("r", encoding="utf-8") as profile_file:
             return _parse_profile(name, load_strict_yaml(profile_file))
+    except OSError as error:
+        raise ProfileError(f"profile '{name}' cannot be read from {path}: {error}") from error
     except yaml.YAMLError as error:
         raise ProfileError(f"profile '{name}' contains invalid YAML: {error}") from error
     except ValueError as error:

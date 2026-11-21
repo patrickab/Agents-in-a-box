@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import yaml
 
+from agent_sandbox.config import PROFILE_SEARCH_PATH
 from agent_sandbox.profile import Mount, Profile, ProfileError, load_profile
 
 
@@ -55,6 +56,14 @@ class TestProfileLoading(unittest.TestCase):
             self.assertEqual(dict(load_profile("gigachad").host_services), {"PI_GATEWAY_URL": 8301})
         self.assertRegex(profile.runtime_fingerprint, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(profile.runtime_fingerprint, load_profile("gigachad").runtime_fingerprint)
+
+    def test_every_bundled_profile_loads(self) -> None:
+        """A broken bundled profile fails here, not in the middle of a factory task."""
+        bundled = sorted(Path(PROFILE_SEARCH_PATH[-1]).glob("*.yaml"))
+        self.assertTrue(bundled)
+        for path in bundled:
+            with self.subTest(profile=path.stem), patch("agent_sandbox.profile.PROFILE_SEARCH_PATH", [str(path.parent)]):
+                self.assertEqual(load_profile(path.stem).name, path.stem)
 
     def test_expands_home_placeholder_in_profile_paths(self) -> None:
         with patch("pathlib.Path.home", return_value=Path("/home/alice")):

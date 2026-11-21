@@ -10,6 +10,7 @@ import secrets
 import threading
 from typing import Any, Protocol, get_args
 
+from agent_sandbox.errors import ProfileError
 from agent_sandbox.factory import git_ops
 from agent_sandbox.factory.config import (
     ConfigError,
@@ -37,7 +38,14 @@ from agent_sandbox.factory.models import (
     TaskState,
     WorkflowInfo,
 )
-from agent_sandbox.factory.runners import Runner, kill_task_processes, make_runner, release_sandbox
+from agent_sandbox.factory.runners import (
+    Runner,
+    kill_task_processes,
+    make_runner,
+    pin_profile,
+    release_sandbox,
+    unreachable_host_services,
+)
 from agent_sandbox.factory.store import Store
 from agent_sandbox.pi import PromptImage
 
@@ -131,6 +139,17 @@ class Engine:
         if raw is None:
             raise not_found(f"task {task_id} not found")
         return TaskConfig.model_validate(raw)
+
+    def prepare_sandbox(self, task_id: str, task_config: TaskConfig) -> None:
+        """Pin the task's sandbox profile and check its host services, refusing the task now instead of mid-run."""
+        if not task_config.sandbox:
+            return
+        try:
+            profile = pin_profile(self.task_dir(task_id), task_config.profile)
+        except ProfileError as error:
+            raise invalid(str(error)) from error
+        if problems := unreachable_host_services(profile):
+            raise invalid("sandbox host service check failed: " + "; ".join(problems))
 
     # --- attachments ---
 
@@ -254,6 +273,8 @@ class Engine:
         if git_ops.run_git(repo_path, "rev-parse", "--verify", "--quiet", task_config.main_branch, check=False).returncode != 0:
             raise invalid(f"branch {task_config.main_branch!r} does not exist in {repo_path}")
         task_id = secrets.token_hex(6)
+        if body.start:
+            self.prepare_sandbox(task_id, task_config)
         self._write_images(task_id, self._decode_images(body.images, REQUEST_IMAGE_PREFIX))
         state = "todo" if body.start else "backlog"
         task = self.store.create_task(
@@ -271,6 +292,8 @@ class Engine:
 
     def start_task(self, task_id: str) -> Task:
         """Move a backlog task to todo and start its workflow."""
+        if self.get_task(task_id).state == "backlog":
+            self.prepare_sandbox(task_id, self.task_config(task_id))
         task = self.store.transition(task_id, ("backlog",), "todo")
         if task is None:
             raise self._wrong_state(task_id, "start", "backlog")
@@ -303,6 +326,8 @@ class Engine:
         """Retry a blocked task from its failed step, or from the merge when the block happened there."""
         current = self.get_task(task_id)
         merging = current.phase == "merge"
+        if current.state == "blocked":
+            self.prepare_sandbox(task_id, self.task_config(task_id))  # Re-pin: a retry picks up a fixed profile.
         task = self.store.transition(task_id, ("blocked",), "merging" if merging else "todo", error=None)
         if task is None:
             raise self._wrong_state(task_id, "retry", "blocked")

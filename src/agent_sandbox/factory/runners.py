@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -25,17 +26,18 @@ from agent_sandbox import (
     StreamEvent,
     WorkspaceArchive,
     extract_archive,
-    load_profile,
     manifest_from_dict,
     manifest_to_dict,
 )
 from agent_sandbox.archive import archived_member_name
+from agent_sandbox.config import HOST_SERVICE_ADDRESS
 from agent_sandbox.factory.config import OUTPUT_DIR, SESSION_DIR, TaskConfig
 from agent_sandbox.factory.models import Envelope, EnvelopeError, parse_envelope
 from agent_sandbox.factory.processes import terminate_process_groups
 from agent_sandbox.factory.prompts import correction_prompt
 from agent_sandbox.manifest import WorkspaceRef
 from agent_sandbox.pi import PiEventStream, build_pi_argv
+from agent_sandbox.profile import Profile, load_profile, load_profile_file, profile_path
 
 OUTPUT_TAIL_CHARS = 8000
 ACTIVE_PROCESS_FILE = "active-process.json"
@@ -315,6 +317,49 @@ def _append_session_members(archive_path: str, session_tar: Path) -> None:
             target.addfile(member, source.extractfile(member) if member.isfile() else None)
 
 
+PINNED_PROFILE = "profile.yaml"  # Under the task's sandbox dir: the profile copy every step of the task runs with.
+HOST_SERVICE_PROBE_TIMEOUT_S = 2.0
+
+
+def pin_profile(task_dir: Path, name: str) -> Profile:
+    """Copy profile `name` into the task dir and return it parsed from that copy; raise ProfileError when it is invalid.
+
+    Later profile edits then reach a task only when it is (re)started, never in the middle of its run.
+    """
+    source = profile_path(name)
+    target = task_dir / "sandbox" / PINNED_PROFILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_bytes(source.read_bytes())
+    try:
+        profile = load_profile_file(temporary, name)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    os.replace(temporary, target)
+    return profile
+
+
+def pinned_profile(task_dir: Path, name: str) -> Profile:
+    """Load the task's pinned profile, or the live one for tasks started before pinning existed."""
+    pinned = task_dir / "sandbox" / PINNED_PROFILE
+    return load_profile_file(pinned, name) if pinned.is_file() else load_profile(name)
+
+
+def unreachable_host_services(profile: Profile) -> list[str]:
+    """Describe each host service of `profile` whose sandbox bridge refuses connections, empty when all accept."""
+    problems = []
+    for variable, port in profile.host_services.items():
+        try:
+            socket.create_connection((HOST_SERVICE_ADDRESS, port), timeout=HOST_SERVICE_PROBE_TIMEOUT_S).close()
+        except OSError as error:
+            problems.append(
+                f"{variable} ({HOST_SERVICE_ADDRESS}:{port}) is unreachable: {error}; "
+                f"rerun scripts/setup_host_services.sh with port {port} in HOST_SERVICE_PORTS"
+            )
+    return problems
+
+
 class SandboxRunner(_HostCommands):
     """Run Pi turns inside an AiaB sandbox; the worktree stays authoritative between runs."""
 
@@ -322,7 +367,8 @@ class SandboxRunner(_HostCommands):
         super().__init__(task_id, worktree, task_dir)
         self.sandbox_dir = task_dir / "sandbox"
         self.profile_name = profile_name
-        self.mount_exclusions = load_profile(profile_name).workdir_mount_paths()
+        self.profile = pinned_profile(task_dir, profile_name)
+        self.mount_exclusions = self.profile.workdir_mount_paths()
 
     def _session_tar(self, phase: str) -> Path:
         return self.sandbox_dir / phase / "session.tar"
@@ -359,6 +405,7 @@ class SandboxRunner(_HostCommands):
             invocation = SandboxInvocation(
                 slot_key=f"task-{self.task_id}",
                 profile_name=self.profile_name,
+                profile=self.profile,
                 run_id=f"{turn.phase}-{uuid.uuid4().hex}",
                 task=turn.pi_task(),
                 active_manifest=manifest,

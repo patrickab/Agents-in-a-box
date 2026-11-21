@@ -10,6 +10,7 @@ import textwrap
 import pytest
 
 from agent_sandbox import WorkspaceArchive
+from agent_sandbox.errors import ProfileError
 from agent_sandbox.factory import runners
 from agent_sandbox.factory.models import EnvelopeError, parse_envelope
 from agent_sandbox.factory.runners import AgentRunError, AgentTurn, CommandResult, LocalRunner
@@ -272,3 +273,41 @@ def test_sandbox_runner_round_trips_worktree_session_and_envelope(tmp_path: Path
     assert not (worktree / ".factory/out/code.json").exists()  # envelopes are read from the capture, never extracted
     assert (worktree / ".factory/out/scenario.py").read_text() == "print('scenario 2')\n"
     assert second.envelope is not None
+
+
+def _write_profile(directory: Path, source: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    mount = f"{{source: {source}, target: /opt/pi, mode: ro}}"
+    (directory / "pinned.yaml").write_text(
+        f"name: pinned\nimage: img\nworkdir: /workspace\nmounts: [{mount}]\npi_binary: /opt/pi/pi\n"
+    )
+
+
+def test_pinned_profile_ignores_later_edits_until_it_is_pinned_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A task keeps the profile it started with; a broken edit only surfaces when the task is (re)started."""
+    profiles, task_dir = tmp_path / "profiles", tmp_path / "task"
+    monkeypatch.setattr("agent_sandbox.profile.PROFILE_SEARCH_PATH", [str(profiles)])
+    _write_profile(profiles, "/host/pi")
+
+    assert runners.pin_profile(task_dir, "pinned").mounts[0].source == "/host/pi"
+    _write_profile(profiles, "relative/pi")  # The edit that blocked a merge: no longer absolute.
+
+    assert runners.pinned_profile(task_dir, "pinned").mounts[0].source == "/host/pi"
+    with pytest.raises(ProfileError, match="mount 0 source must be an absolute path"):
+        runners.pin_profile(task_dir, "pinned")
+    assert runners.pinned_profile(task_dir, "pinned").mounts[0].source == "/host/pi"  # A failed re-pin keeps the old copy.
+
+
+def test_unreachable_host_services_names_the_refused_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_sandbox.profile import Profile
+
+    def refuse(address: tuple[str, int], timeout: float) -> None:
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr(runners.socket, "create_connection", refuse)
+    profile = Profile("p", "img", "/workspace", (), "/opt/pi/pi", host_services={"PI_GATEWAY_URL": 8300})
+
+    [problem] = runners.unreachable_host_services(profile)
+    assert "PI_GATEWAY_URL" in problem and ":8300" in problem and "setup_host_services.sh" in problem
+    assert runners.unreachable_host_services(Profile("p", "img", "/workspace", (), "/opt/pi/pi")) == []
+
